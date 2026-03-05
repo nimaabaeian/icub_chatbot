@@ -24,17 +24,45 @@ const ICUB_FALLBACKS = [
 ];
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
+type UserConversationStyle = {
+  usesEmojis: boolean | null;
+  messageLength: string;  // "short" | "medium" | "long"
+  tone: string;           // e.g. "playful"
+};
+type UserProfile = {
+  userName?: string;
+  userNickname?: string;
+  userAge?: number;
+  userLikes?: string[];
+  userDislikes?: string[];
+  userFavoriteTopics?: string[];
+  userRelationshipStyle?: string;
+  userInsideJokes?: string[];
+  userLastPersonalUpdate?: string;
+  userConversationStyle?: UserConversationStyle;
+  userFirstTalked?: number;
+  userLastTalked?: number;
+};
 type ChatMemory = {
   messages: ChatMessage[];
   summary?: string;
-  turnCount: number;          // total successful turns ever stored
-  lastSummarizedAt: number;   // turnCount value at last summary
-  lastGoodModel?: string;     // most-recently-successful model — tried first next turn
+  turnCount: number;              // total successful turns ever stored
+  lastSummarizedAt: number;       // turnCount value at last summary
+  lastGoodModel?: string;         // most-recently-successful model — tried first next turn
   pendingUser?: { text: string; at: number };
-  userName?: string;          // display name captured from Telegram or text patterns
-  userAge?: number;           // age if the user mentioned it
-  userLikes?: string[];       // up to 5 things the user mentioned liking
-  userDislikes?: string[];    // up to 5 things the user mentioned disliking
+  // user profile
+  userName?: string;              // display name captured from Telegram or text patterns
+  userNickname?: string;          // preferred nickname
+  userAge?: number;               // age if the user mentioned it
+  userLikes?: string[];           // up to 5 things the user mentioned liking
+  userDislikes?: string[];        // up to 5 things the user mentioned disliking
+  userFavoriteTopics?: string[];  // up to 5 topics the user is into
+  userRelationshipStyle?: string; // e.g. "protective"
+  userInsideJokes?: string[];     // shared inside jokes
+  userLastPersonalUpdate?: string;// e.g. "i have an exam tomorrow"
+  userConversationStyle?: UserConversationStyle;
+  userFirstTalked?: number;       // ms timestamp of first interaction
+  userLastTalked?: number;        // ms timestamp of most recent interaction
   updatedAt: number;
 };
 type OpenRouterMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -146,71 +174,210 @@ function sendTypingAction(token: string, chatId: number): void {
 }
 
 /**
- * Extract / update user identity from Telegram sender metadata and message text.
- * Patterns: Telegram first_name, "call me X", "my name is X", "I like/love/prefer X",
- * "I hate/dislike/can't stand X", "I am X years old".
+ * Extract / update the full user profile from Telegram sender metadata and message text.
+ * Captures: name, nickname, age, likes, dislikes, favorite topics, relationship style,
+ * last personal update, conversation style (emoji use, message length, tone), and timestamps.
  */
 function extractUserInfo(
   memory: ChatMemory,
   fromName: string | undefined,
   userText: string
-): { userName: string | undefined; userAge: number | undefined; userLikes: string[] | undefined; userDislikes: string[] | undefined } {
+): UserProfile {
+  const now = Date.now();
+
   let userName = memory.userName;
+  let userNickname = memory.userNickname;
   let userAge = memory.userAge;
   let userLikes: string[] = memory.userLikes ? [...memory.userLikes] : [];
   let userDislikes: string[] = memory.userDislikes ? [...memory.userDislikes] : [];
+  let userFavoriteTopics: string[] = memory.userFavoriteTopics ? [...memory.userFavoriteTopics] : [];
+  let userRelationshipStyle = memory.userRelationshipStyle;
+  const userInsideJokes: string[] = memory.userInsideJokes ? [...memory.userInsideJokes] : [];
+  let userLastPersonalUpdate = memory.userLastPersonalUpdate;
+  const userConversationStyle: UserConversationStyle = memory.userConversationStyle
+    ? { ...memory.userConversationStyle }
+    : { usesEmojis: null, messageLength: "", tone: "" };
+  const userFirstTalked = memory.userFirstTalked ?? now;
+  const userLastTalked = now;
 
   // Capture Telegram display name if not yet known
   if (fromName && !userName) userName = fromName;
 
-  // "call me X" / "my name is X"
-  const nameMatch = userText.match(/\b(?:call me|my name is)\s+([\w'-]{2,20})/i);
-  if (nameMatch) userName = nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1);
+  if (userText) {
+    // ── Helpers ──────────────────────────────────────────────────────────────
+    // Strip leading infinitive/gerund prefix and trailing filler from a captured phrase.
+    const cleanPhrase = (s: string): string =>
+      s.trim()
+        .replace(/^(?:to be |to |being |about |like )/i, "")
+        .replace(/\s+(?:too|also|though|tho|rn|right now|a lot|so much|honestly|ngl|tbh|lol|haha|hehe|btw|imo|fr|frfr|no cap|ong|lowkey|highkey|deadass|bruh|and (?:stuff|things)|or (?:whatever|something|smth))$/i, "")
+        .trim()
+        .toLowerCase()
+        .slice(0, 40);
 
-  // "I am X years old" / "I'm X years old"
-  const ageMatch = userText.match(/\bi'?m\s+(\d{1,2})\s+years?\s+old/i) ??
-                   userText.match(/\bi am\s+(\d{1,2})\s+years?\s+old/i) ??
-                   userText.match(/\bmy age is\s+(\d{1,2})/i);
-  if (ageMatch) {
-    const age = parseInt(ageMatch[1], 10);
-    if (age >= 3 && age <= 120) userAge = age;
-  }
+    const addUnique = (arr: string[], val: string, max: number): string[] => {
+      const v = cleanPhrase(val);
+      // Skip empty, pronouns, or bare filler words
+      if (!v || v.length < 2 || /^(?:you|me|it|him|her|us|that|this|them|those|these|everyone|anyone|someone|nobody|everything|nothing|stuff|things)$/.test(v)) return arr;
+      if (arr.includes(v)) return arr;
+      return [...arr, v].slice(-max);
+    };
 
-  // "I like/love/enjoy/prefer X" / "my favorite is X"
-  const likesMatch = userText.match(/\b(?:i (?:like|love|enjoy|prefer|adore)|my favou?rite(?: is)?)\s+([^,.!?\n]{2,40})/i);
-  if (likesMatch) {
-    const liked = likesMatch[1].trim().toLowerCase();
-    if (!userLikes.includes(liked)) userLikes = [...userLikes, liked].slice(-5);
-  }
+    // ── Name and nickname ─────────────────────────────────────────────────────
+    // Check nickname phrases FIRST so "you can call me X" doesn't also fire the name rule.
+    const nickMatch = userText.match(
+      /\b(?:you can call me|my friends call me|everyone calls me|people call me)\s+([\w'-]{2,20})/i
+    );
+    if (nickMatch) {
+      userNickname = nickMatch[1].toLowerCase();
+    } else {
+      // Name: "my name is/my name's/call me/just call me/i go by X"
+      const nameMatch = userText.match(
+        /\b(?:my name'?s|my name is|just call me|call me|i go by)\s+([\w'-]{2,20})/i
+      );
+      if (nameMatch) userName = nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1);
+    }
 
-  // "I hate/dislike/can't stand/don't like X"
-  const dislikesMatch = userText.match(/\b(?:i (?:hate|dislike|despise|can'?t stand)|i don'?t (?:like|enjoy))\s+([^,.!?\n]{2,40})/i);
-  if (dislikesMatch) {
-    const disliked = dislikesMatch[1].trim().toLowerCase();
-    if (!userDislikes.includes(disliked)) userDislikes = [...userDislikes, disliked].slice(-5);
+    // ── Age ───────────────────────────────────────────────────────────────────
+    // Handles: "i'm 10 years old", "im 12 yo", "just turned 8", "turning 11",
+    //          "i'll be 13", "im almost 9", "about to turn 7", "my age is 10"
+    const ageMatch =
+      userText.match(/\bi'?m\s+(\d{1,2})\s+years?\s+old/i) ??
+      userText.match(/\bi\s+am\s+(\d{1,2})\s+years?\s+old/i) ??
+      userText.match(/\bmy age is\s+(\d{1,2})/i) ??
+      userText.match(/\bi\s+(?:just\s+)?turned\s+(\d{1,2})\b/i) ??
+      userText.match(/\bturning\s+(\d{1,2})\b/i) ??
+      userText.match(/\bi'?m\s+(\d{1,2})\s*yo\b/i) ??
+      userText.match(/\bi'?m\s+(?:almost|nearly|about to (?:be|turn))\s+(\d{1,2})\b/i) ??
+      userText.match(/\bi'?ll\s+be\s+(\d{1,2})\b/i);
+    if (ageMatch) {
+      const age = parseInt(ageMatch[1], 10);
+      if (age >= 3 && age <= 120) userAge = age;
+    }
+
+    // ── Likes ─────────────────────────────────────────────────────────────────
+    // Handles casual variants: "i rlly like X", "i luv X", "im obsessed w X",
+    // "lowkey love X", "im addicted to X", "can't get enough of X", "i dig X"
+    const likesMatch = userText.match(
+      /\b(?:i (?:(?:really|rlly|rly|absolutely|totally|kinda|lowkey|highkey|sorta|literally|genuinely|actually|seriously|deadass|so) )?(?:like|liek|love|luv|enjoy|prefer|adore)|my favou?rite(?:\s+\w+)?(?: is)?|(?:i'?m|im) (?:a (?:huge|big) fan of|obsessed w(?:ith)?|addicted to|in love w(?:ith)?)|(?:i )?can'?t get enough of|i dig)\s+([^,.!?\n]{2,50})/i
+    );
+    if (likesMatch) userLikes = addUnique(userLikes, likesMatch[1], 5);
+
+    // ── Dislikes ──────────────────────────────────────────────────────────────
+    // Handles casual variants: "i rlly hate X", "dont like X", "cant stand X",
+    // "not rly into X", "not a fan of X", "pls dont talk about X"
+    const dislikesMatch = userText.match(
+      /\b(?:i (?:(?:really|rlly|rly|honestly|literally|seriously|lowkey|kinda|actually|deadass) )?(?:hate|dislike|despise|can'?t stand|cant stand)|i (?:don'?t|do not|dont) (?:(?:really|rlly|rly) )?(?:like|liek|love|luv|enjoy|want|care (?:for|about))|(?:(?:i'?m|im) )?not (?:(?:really|rlly|rly) )?(?:a fan of|into|feeling)|i(?:'ve| have)? never (?:(?:really|rlly) )?liked?|(?:pls |please )?(?:don'?t|dont|do not) (?:talk|ask|mention|bring up)(?:\s+(?:about|me about))?)\s+([^,.!?\n]{2,50})/i
+    );
+    if (dislikesMatch) userDislikes = addUnique(userDislikes, dislikesMatch[1], 5);
+
+    // ── Favorite topics ───────────────────────────────────────────────────────
+    // Handles casual variants: "im rlly into X", "im super into X",
+    // "im big on X", "passionate about X", "i love talking about X"
+    const topicMatch = userText.match(
+      /\b(?:(?:i'?m|im) (?:(?:really|rlly|rly|so|super|lowkey|highkey) )?into|i am (?:(?:really|rlly|rly|so|super) )?into|i love talking about|my favou?rite thing is|(?:(?:i'?m|im) )?passionate about|(?:i'?m|im) (?:(?:really|rlly|rly) )?(?:big|huge) on)\s+([^,.!?\n]{2,50})/i
+    );
+    if (topicMatch) userFavoriteTopics = addUnique(userFavoriteTopics, topicMatch[1], 5);
+
+    // ── Life / status updates ─────────────────────────────────────────────────
+    // Broadly captures status, health, school, work, sleep, travel, mood
+    const lifeMatch = userText.match(
+      /\b(?:i(?:'?m| am) (?:sick|ill|tired|sleepy|busy|stressed|overwhelmed|anxious|nervous|bored|depressed|exhausted|lonely|moving|traveling|on (?:vacation|holiday|break|a trip)|at (?:work|school|the (?:hospital|doctor|dentist))|not feeling (?:well|good|great)|feeling (?:sick|down|sad|unwell|better|worse))|(?:i )?(?:have|got|gotta) (?:an? )?(?:exam|test|quiz|homework|practice|class|appointment|deadline|interview|meeting)|i (?:just )?got (?:back|home|off work|off school)|(?:i )?can'?t sleep|(?:i'?m |im )?going to (?:bed|sleep)|(?:i )?just woke up|(?:i'?m |im )?(?:studying|running late))\b[^.!?\n]{0,60}/i
+    );
+    if (lifeMatch) userLastPersonalUpdate = lifeMatch[0].trim().toLowerCase();
+
+    // ── Conversation style — emoji usage ──────────────────────────────────────
+    // \p{Extended_Pictographic} covers the full graphical emoji set in V8/CF Workers
+    if (userConversationStyle.usesEmojis !== true && /\p{Extended_Pictographic}/u.test(userText)) {
+      userConversationStyle.usesEmojis = true;
+    }
+
+    // ── Conversation style — message length ───────────────────────────────────
+    const msgLen = userText.length;
+    userConversationStyle.messageLength = msgLen < 25 ? "short" : msgLen > 120 ? "long" : "medium";
+
+    // ── Conversation style — tone ─────────────────────────────────────────────
+    // Note: \b doesn't work with emoji (not word chars), so emoji are checked outside \b
+    if (/(?:\b(?:haha+|lol+|hehe+|lmao+|lmfao|rofl|bruh)\b|\bi'?m (?:dead|dying|crying)\b|😂|😭|🤣|💀)/i.test(userText)) {
+      userConversationStyle.tone = "playful";
+    }
+
+    // ── Relationship style ────────────────────────────────────────────────────
+    // Catches caring/protective language: "poor icub", "are you okay", "awww",
+    // "hang in there", "i feel bad for you", "that's so sad", "i'll feed you"
+    if (/(?:\b(?:poor (?:i[- ]?cub|thing|baby|little guy)|are you (?:ok|okay|alright)|(?:i'?ll|ill|i will|i can|i'?d(?: love to)?) (?:come )?feed you|don'?t worry|hope you(?:'re| are) (?:ok|okay|alright)|wish i could (?:help|be there|feed you)|i(?:'d| would) come|i want to (?:help|feed you)|hang in there|stay strong|i feel (?:bad|sorry) for you|that(?:'s| is) so sad)\b|\baww+\b)/i.test(userText)) {
+      userRelationshipStyle = "protective";
+    }
   }
 
   return {
     userName,
+    userNickname,
     userAge,
     userLikes: userLikes.length > 0 ? userLikes : undefined,
     userDislikes: userDislikes.length > 0 ? userDislikes : undefined,
+    userFavoriteTopics: userFavoriteTopics.length > 0 ? userFavoriteTopics : undefined,
+    userRelationshipStyle,
+    userInsideJokes: userInsideJokes.length > 0 ? userInsideJokes : undefined,
+    userLastPersonalUpdate,
+    userConversationStyle,
+    userFirstTalked,
+    userLastTalked,
   };
 }
 
 /** Build a system-prompt snippet personalising replies with known user info. */
-function buildUserContext(
-  userName: string | undefined,
-  userAge: number | undefined,
-  userLikes: string[] | undefined,
-  userDislikes: string[] | undefined
-): string {
+function buildUserContext(profile: UserProfile): string {
+  const safeStr = (v: unknown, maxLen = 60): string => {
+    if (!v || typeof v !== "string") return "";
+    return v.replace(/\s+/g, " ").trim().slice(0, maxLen);
+  };
+  const safeList = (v: unknown, max = 5): string[] => {
+    if (!Array.isArray(v)) return [];
+    return (v as unknown[]).map((s) => safeStr(s)).filter(Boolean).slice(0, max);
+  };
+
   const parts: string[] = [];
-  if (userName) parts.push(`The user's name is ${userName}. Only use their name very rarely — like a real friend texting, not every message. Most of the time just talk without using it.`);
-  if (userAge) parts.push(`They are ${userAge} years old.`);
-  if (userLikes && userLikes.length > 0) parts.push(`They've mentioned liking: ${userLikes.join(", ")}.`);
-  if (userDislikes && userDislikes.length > 0) parts.push(`They've mentioned disliking: ${userDislikes.join(", ")}. Don't bring these up unless they do.`);
-  return parts.join(" ");
+
+  const name = safeStr(profile.userName);
+  const nickname = safeStr(profile.userNickname);
+  if (name) {
+    let nameStr = `The user's name is ${name}.`;
+    if (nickname) nameStr += ` They prefer to be called ${nickname}.`;
+    nameStr += " Only use their name very rarely — like a real friend texting, not every message.";
+    parts.push(nameStr);
+  }
+
+  if (profile.userAge) parts.push(`They are ${profile.userAge} years old.`);
+
+  // merge favorite_topics + likes (topics first, deduplicated)
+  const topics = safeList(profile.userFavoriteTopics);
+  const likes = safeList(profile.userLikes);
+  const allInterests = [...new Set([...topics, ...likes])].slice(0, 5);
+  if (allInterests.length > 0) parts.push(`They like: ${allInterests.join(", ")}.`);
+
+  const dislikes = safeList(profile.userDislikes, 3);
+  if (dislikes.length > 0) parts.push(`They dislike: ${dislikes.join(", ")}. Don't bring these up unless they do.`);
+
+  const relStyle = safeStr(profile.userRelationshipStyle);
+  if (relStyle) parts.push(`Their relationship style with iCub is ${relStyle}.`);
+
+  const lifeUpdate = safeStr(profile.userLastPersonalUpdate, 80);
+  if (lifeUpdate) parts.push(`Recent update from them: ${lifeUpdate}.`);
+
+  const jokes = safeList(profile.userInsideJokes, 3);
+  if (jokes.length > 0) parts.push(`Shared inside joke: ${jokes[jokes.length - 1]}.`);
+
+  const cs = profile.userConversationStyle;
+  if (cs) {
+    const styleParts: string[] = [];
+    if (cs.tone) styleParts.push(`${cs.tone} tone`);
+    if (cs.messageLength) styleParts.push(`${cs.messageLength} messages`);
+    if (cs.usesEmojis === true) styleParts.push("uses emojis");
+    if (styleParts.length > 0) parts.push(`Conversation style: ${styleParts.join(", ")}.`);
+  }
+
+  const result = parts.join(" ");
+  return result.length > 400 ? result.slice(0, 397).replace(/\s\S*$/, "") + "..." : result;
 }
 
 /**
@@ -414,26 +581,64 @@ export default {
 
       // ── /start ────────────────────────────────────────────────────────────
       if (text === "/start") {
-        // Load existing memory so we can preserve user profile across resets
-        let existingProfile: { userName?: string; userAge?: number; userLikes?: string[]; userDislikes?: string[] } = {};
+        // Load existing memory so we can preserve the full user profile across resets
+        let existingProfile: UserProfile = {};
         try {
           const stored = await env.CHAT_MEMORY.get(`chat:${chatId}`);
-          if (stored) { const m = JSON.parse(stored); existingProfile = { userName: m.userName, userAge: m.userAge, userLikes: m.userLikes, userDislikes: m.userDislikes }; }
+          if (stored) {
+            const m: ChatMemory = JSON.parse(stored);
+            existingProfile = {
+              userName: m.userName, userNickname: m.userNickname, userAge: m.userAge,
+              userLikes: m.userLikes, userDislikes: m.userDislikes,
+              userFavoriteTopics: m.userFavoriteTopics, userRelationshipStyle: m.userRelationshipStyle,
+              userInsideJokes: m.userInsideJokes, userLastPersonalUpdate: m.userLastPersonalUpdate,
+              userConversationStyle: m.userConversationStyle,
+              userFirstTalked: m.userFirstTalked, userLastTalked: m.userLastTalked,
+            };
+          }
         } catch { /* ignore */ }
         // Capture name from /start sender if not yet known
         const startFrom = msg.from;
         const startName = startFrom?.first_name || startFrom?.username;
         const userName = existingProfile.userName || startName;
-        // Write fresh memory preserving user profile
+        // Write fresh memory preserving full user profile
         const freshMemory: ChatMemory = {
           messages: [], turnCount: 0, lastSummarizedAt: 0, updatedAt: Date.now(),
-          userName, userAge: existingProfile.userAge, userLikes: existingProfile.userLikes, userDislikes: existingProfile.userDislikes,
+          ...existingProfile,
+          userName,
         };
         await env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(freshMemory), { expirationTtl: KV_TTL }).catch(() => {});
         const greeting = userName
           ? `hey ${userName}! i'm iCub 🤖 what's up?`
           : "hey! i'm iCub 🤖 what's on your mind?";
         await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, greeting);
+        return new Response("ok", { status: 200 });
+      }
+
+      // ── /reset ────────────────────────────────────────────────────────────
+      if (text === "/reset") {
+        // Clear conversation history only — keep the full user profile
+        let resetProfile: UserProfile = {};
+        try {
+          const stored = await env.CHAT_MEMORY.get(`chat:${chatId}`);
+          if (stored) {
+            const m: ChatMemory = JSON.parse(stored);
+            resetProfile = {
+              userName: m.userName, userNickname: m.userNickname, userAge: m.userAge,
+              userLikes: m.userLikes, userDislikes: m.userDislikes,
+              userFavoriteTopics: m.userFavoriteTopics, userRelationshipStyle: m.userRelationshipStyle,
+              userInsideJokes: m.userInsideJokes, userLastPersonalUpdate: m.userLastPersonalUpdate,
+              userConversationStyle: m.userConversationStyle,
+              userFirstTalked: m.userFirstTalked, userLastTalked: m.userLastTalked,
+            };
+          }
+        } catch { /* ignore */ }
+        const clearedMemory: ChatMemory = {
+          messages: [], turnCount: 0, lastSummarizedAt: 0, updatedAt: Date.now(),
+          ...resetProfile,
+        };
+        await env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(clearedMemory), { expirationTtl: KV_TTL }).catch(() => {});
+        await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "ok let's start fresh 👍");
         return new Response("ok", { status: 200 });
       }
 
@@ -449,9 +654,13 @@ export default {
       const history = memory.messages ?? [];
       const lastAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content;
 
-      // ── User identity: extract/update name, age, likes & dislikes ──────────
+      // ── User identity: extract/update full user profile ────────────────────
       const fromName = msg.from?.first_name || msg.from?.username;
-      const { userName, userAge, userLikes, userDislikes } = extractUserInfo(memory, fromName, text);
+      const userProfile = extractUserInfo(memory, fromName, text);
+      const { userName, userNickname, userAge, userLikes, userDislikes,
+              userFavoriteTopics, userRelationshipStyle, userInsideJokes,
+              userLastPersonalUpdate, userConversationStyle,
+              userFirstTalked, userLastTalked } = userProfile;
 
       // ── Typing indicator (best-effort, fire-and-forget) ───────────────────
       sendTypingAction(env.TELEGRAM_BOT_TOKEN, chatId);
@@ -488,7 +697,7 @@ export default {
           console.log("Total budget exceeded, stopping model loop");
           break;
         }
-        const userCtx = buildUserContext(userName, userAge, userLikes, userDislikes);
+        const userCtx = buildUserContext(userProfile);
         const messages = buildMessagesForModel(model, history, memory.summary, textForModel, userCtx || undefined);
         const result = await callOpenRouter(env, model, messages, deadline);
 
@@ -528,9 +737,17 @@ export default {
               lastGoodModel: model,
               pendingUser: undefined,
               userName,
+              userNickname,
               userAge,
               userLikes,
               userDislikes,
+              userFavoriteTopics,
+              userRelationshipStyle,
+              userInsideJokes,
+              userLastPersonalUpdate,
+              userConversationStyle,
+              userFirstTalked,
+              userLastTalked,
               updatedAt: Date.now(),
             };
             await env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(newMemory), {
@@ -547,9 +764,17 @@ export default {
         console.log("All models failed for chatId:", chatId);
         memory.pendingUser = { text, at: Date.now() };
         memory.userName = userName;
+        memory.userNickname = userNickname;
         memory.userAge = userAge;
         memory.userLikes = userLikes;
         memory.userDislikes = userDislikes;
+        memory.userFavoriteTopics = userFavoriteTopics;
+        memory.userRelationshipStyle = userRelationshipStyle;
+        memory.userInsideJokes = userInsideJokes;
+        memory.userLastPersonalUpdate = userLastPersonalUpdate;
+        memory.userConversationStyle = userConversationStyle;
+        memory.userFirstTalked = userFirstTalked;
+        memory.userLastTalked = userLastTalked;
         env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(memory), {
           expirationTtl: KV_TTL,
         }).catch(() => {});
