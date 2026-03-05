@@ -1,4 +1,4 @@
-# tg-icub-bot
+# iCub chat bot
 
 A Telegram chatbot deployed as a **Cloudflare Worker** that impersonates **iCub**, the small humanoid research robot from the Italian Institute of Technology (IIT). The bot has no fixed LLM backend — it tries a prioritised list of free OpenRouter models in order and falls back gracefully when any of them fail.
 
@@ -12,6 +12,22 @@ A Telegram chatbot deployed as a **Cloudflare Worker** that impersonates **iCub*
 | Storage | Cloudflare KV (`CHAT_MEMORY`) |
 | LLM | OpenRouter — free-tier model cascade |
 | Messaging | Telegram Bot API — webhook mode |
+
+## Models
+
+Current fallback order (`MODELS_TO_TRY` in `src/index.ts`):
+
+1. `stepfun/step-3.5-flash:free`
+2. `mistralai/mistral-small-3.1-24b-instruct:free`
+3. `meta-llama/llama-3.3-70b-instruct:free`
+4. `z-ai/glm-4.5-air:free`
+5. `nousresearch/hermes-3-llama-3.1-405b:free`
+6. `google/gemma-3-27b-it:free` (systemless handling)
+7. `openrouter/free`
+
+Notes:
+- The bot tries `lastGoodModel` first when available, then follows the order above.
+- Summarization uses the first non-Gemma model from this list.
 
 ## Directory Structure
 
