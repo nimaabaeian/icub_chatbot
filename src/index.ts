@@ -38,6 +38,7 @@ type UserProfile = {
   userFavoriteTopics?: string[];
   userRelationshipStyle?: string;
   userInsideJokes?: string[];
+  userTrustLevel?: string;        // "friend" | "close_friend" (default: "friend")
   userLastPersonalUpdate?: string;
   userConversationStyle?: UserConversationStyle;
   userFirstTalked?: number;
@@ -59,6 +60,7 @@ type ChatMemory = {
   userFavoriteTopics?: string[];  // up to 5 topics the user is into
   userRelationshipStyle?: string; // e.g. "protective"
   userInsideJokes?: string[];     // shared inside jokes
+  userTrustLevel?: string;        // "friend" | "close_friend"
   userLastPersonalUpdate?: string;// e.g. "i have an exam tomorrow"
   userConversationStyle?: UserConversationStyle;
   userFirstTalked?: number;       // ms timestamp of first interaction
@@ -133,6 +135,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Normalize casual chat text for robust regex matching.
+ * - Collapses 3+ repeated characters ('loooove' → 'love')
+ * - Collapses multiple whitespace into a single space
+ */
+function normalizeForMatching(text: string): string {
+  return text
+    .replace(/(.)(\1){2,}/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * Lightweight ambiguity rewrite.
  * If the last iCub reply offered a choice and the user responds with an abbreviated
  * acceptance or a likely typo of a word the assistant just mentioned, clarify before
@@ -176,7 +190,7 @@ function sendTypingAction(token: string, chatId: number): void {
 /**
  * Extract / update the full user profile from Telegram sender metadata and message text.
  * Captures: name, nickname, age, likes, dislikes, favorite topics, relationship style,
- * last personal update, conversation style (emoji use, message length, tone), and timestamps.
+ * inside jokes, trust level, last personal update, conversation style, and timestamps.
  */
 function extractUserInfo(
   memory: ChatMemory,
@@ -193,6 +207,7 @@ function extractUserInfo(
   let userFavoriteTopics: string[] = memory.userFavoriteTopics ? [...memory.userFavoriteTopics] : [];
   let userRelationshipStyle = memory.userRelationshipStyle;
   const userInsideJokes: string[] = memory.userInsideJokes ? [...memory.userInsideJokes] : [];
+  let userTrustLevel = memory.userTrustLevel ?? "friend";
   let userLastPersonalUpdate = memory.userLastPersonalUpdate;
   const userConversationStyle: UserConversationStyle = memory.userConversationStyle
     ? { ...memory.userConversationStyle }
@@ -205,83 +220,101 @@ function extractUserInfo(
 
   if (userText) {
     // ── Helpers ──────────────────────────────────────────────────────────────
-    // Strip leading infinitive/gerund prefix and trailing filler from a captured phrase.
-    const cleanPhrase = (s: string): string =>
+    // Normalise once so all patterns work on collapsed text
+    const norm = normalizeForMatching(userText);
+
+    // Strip leading/trailing filler from a regex capture and lowercase it.
+    const cleanPhrase = (s: string, maxLen = 40): string =>
       s.trim()
-        .replace(/^(?:to be |to |being |about |like )/i, "")
-        .replace(/\s+(?:too|also|though|tho|rn|right now|a lot|so much|honestly|ngl|tbh|lol|haha|hehe|btw|imo|fr|frfr|no cap|ong|lowkey|highkey|deadass|bruh|and (?:stuff|things)|or (?:whatever|something|smth))$/i, "")
+        .replace(/^(?:to be |to |being |about |like |basically |kinda |kind of |sort of |um+ |uh+ |well |so |just |really |lowkey |highkey )/i, "")
+        .replace(/\s+(?:a lot|very much|so much|too|also|btw|tho|though|actually|honestly|ngl|tbh|lol|haha|hehe|rn|fr|frfr|no cap|ong|lowkey|highkey|deadass|bruh|and (?:stuff|things)|or (?:whatever|something|smth)|you know|idk|imo|i guess|i think)\s*$/i, "")
+        .trim()
+        .replace(/[!.,;:?]+$/, "")
         .trim()
         .toLowerCase()
-        .slice(0, 40);
+        .slice(0, maxLen);
 
     const addUnique = (arr: string[], val: string, max: number): string[] => {
       const v = cleanPhrase(val);
-      // Skip empty, pronouns, or bare filler words
-      if (!v || v.length < 2 || /^(?:you|me|it|him|her|us|that|this|them|those|these|everyone|anyone|someone|nobody|everything|nothing|stuff|things)$/.test(v)) return arr;
+      if (!v || v.length < 2 || /^(?:you|me|it|him|her|us|that|this|them|those|these|everyone|anyone|someone|nobody|everything|nothing|stuff|things|a|an|the|i|to|for|and|or|so|but|my|your)$/.test(v)) return arr;
       if (arr.includes(v)) return arr;
       return [...arr, v].slice(-max);
     };
 
-    // ── Name and nickname ─────────────────────────────────────────────────────
-    // Check nickname phrases FIRST so "you can call me X" doesn't also fire the name rule.
-    const nickMatch = userText.match(
-      /\b(?:you can call me|my friends call me|everyone calls me|people call me)\s+([\w'-]{2,20})/i
+    const isMeaningful = (s: string, minLen = 2): boolean => {
+      if (!s || s.trim().length < minLen) return false;
+      const STOPWORDS = new Set(["a","an","the","it","this","that","them","things","stuff",
+        "something","everything","anything","i","me","to","for","and","or","so","but","my","your"]);
+      return !STOPWORDS.has(s.trim().toLowerCase());
+    };
+
+    // ── Nickname — checked FIRST so it doesn't also fire the name rule ────────
+    const nickMatch = norm.match(
+      /\b(?:you can call me|my friends call me|everyone calls me|people call me|just call me|my nickname is|my nick is)\s+([\w'-]{2,20})/i
     );
     if (nickMatch) {
       userNickname = nickMatch[1].toLowerCase();
     } else {
-      // Name: "my name is/my name's/call me/just call me/i go by X"
-      const nameMatch = userText.match(
-        /\b(?:my name'?s|my name is|just call me|call me|i go by)\s+([\w'-]{2,20})/i
+      // ── Name ──────────────────────────────────────────────────────────────
+      // "my name is/my name's/call me/i go by/i'm called/i am called/they call me/the name's X"
+      const nameMatch = norm.match(
+        /\b(?:my name'?s|my name is|call me|i go by|i'?m called|i am called|they call me|the name'?s)\s+([\w'-]{2,20})/i
       );
-      if (nameMatch) userName = nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1);
+      if (nameMatch) {
+        const n = nameMatch[1];
+        userName = n.charAt(0).toUpperCase() + n.slice(1);
+      }
     }
 
     // ── Age ───────────────────────────────────────────────────────────────────
-    // Handles: "i'm 10 years old", "im 12 yo", "just turned 8", "turning 11",
-    //          "i'll be 13", "im almost 9", "about to turn 7", "my age is 10"
+    // Negative lookahead excludes ordinals and measurement units (min, km, %, etc.)
+    // Allows up to 3 digits (capped to 120 later); matches "i'm 23", "my age is 30",
+    // "i've just turned 18", "turning 25 soon", "i'll be 21 next year", "im 14 yo".
     const ageMatch =
-      userText.match(/\bi'?m\s+(\d{1,2})\s+years?\s+old/i) ??
-      userText.match(/\bi\s+am\s+(\d{1,2})\s+years?\s+old/i) ??
-      userText.match(/\bmy age is\s+(\d{1,2})/i) ??
-      userText.match(/\bi\s+(?:just\s+)?turned\s+(\d{1,2})\b/i) ??
-      userText.match(/\bturning\s+(\d{1,2})\b/i) ??
-      userText.match(/\bi'?m\s+(\d{1,2})\s*yo\b/i) ??
-      userText.match(/\bi'?m\s+(?:almost|nearly|about to (?:be|turn))\s+(\d{1,2})\b/i) ??
-      userText.match(/\bi'?ll\s+be\s+(\d{1,2})\b/i);
+      norm.match(/\b(?:i'?m|i\s+am)\s+(\d{1,3})(?:\s+y(?:ea)?rs?\s+old)?(?!\s*(?:st|nd|rd|th|min(?:ute)?s?|hours?|hrs?|sec(?:ond)?s?|days?|weeks?|months?|km|miles?|meters?|percent|%|kg|lbs?|cm|mm|pm|am)\b)/i) ??
+      norm.match(/\bmy\s+age\s+is\s+(\d{1,3})\b/i) ??
+      norm.match(/\bi(?:'?ve)?\s+just\s+turned\s+(\d{1,3})\b/i) ??
+      norm.match(/\bi\s+(?:just\s+)?turned\s+(\d{1,3})\b/i) ??
+      norm.match(/\b(?:i'?m\s+)?turning\s+(\d{1,3})\s+(?:soon|next|this|tomorrow)\b/i) ??
+      norm.match(/\bi(?:'?l+|\s+wil+)\s+be\s+(\d{1,3})\s+(?:soon|next|this|tomorrow)\b/i) ??
+      norm.match(/\bi'?m\s+(\d{1,3})\s*yo\b/i) ??
+      norm.match(/\bi'?m\s+(?:almost|nearly|about\s+to\s+(?:be|turn))\s+(\d{1,3})\b/i) ??
+      norm.match(/\bi'?ll\s+be\s+(\d{1,3})\b/i);
     if (ageMatch) {
       const age = parseInt(ageMatch[1], 10);
       if (age >= 3 && age <= 120) userAge = age;
     }
 
     // ── Likes ─────────────────────────────────────────────────────────────────
-    // Handles casual variants: "i rlly like X", "i luv X", "im obsessed w X",
-    // "lowkey love X", "im addicted to X", "can't get enough of X", "i dig X"
-    const likesMatch = userText.match(
-      /\b(?:i (?:(?:really|rlly|rly|absolutely|totally|kinda|lowkey|highkey|sorta|literally|genuinely|actually|seriously|deadass|so) )?(?:like|liek|love|luv|enjoy|prefer|adore)|my favou?rite(?:\s+\w+)?(?: is)?|(?:i'?m|im) (?:a (?:huge|big) fan of|obsessed w(?:ith)?|addicted to|in love w(?:ith)?)|(?:i )?can'?t get enough of|i dig)\s+([^,.!?\n]{2,50})/i
+    // "i (really) like/love/enjoy/prefer/adore/dig X", "i'm a big fan of X",
+    // "i'm obsessed with X", "i'm addicted to X", "can't get enough of X",
+    // "my favourite (is|one is|thing is) X"
+    const likesMatch = norm.match(
+      /\b(?:i\s+(?:(?:really|rlly|rly|absolutely|totally|kinda|lowkey|highkey|sorta|literally|genuinely|actually|seriously|deadass|so)\s+)?(?:like|liek|love|luv|enjoy|prefer|adore|dig)|my\s+favou?rite(?:\s+(?:is|one\s+is|thing\s+is))?|(?:i'?m|im)\s+(?:a\s+(?:huge|big)\s+fan\s+of|obsessed\s+w(?:ith)?|addicted\s+to|in\s+love\s+w(?:ith)?)|(?:i\s+)?can'?t\s+get\s+enough\s+of)\s+([^,.!?\n]{2,40})/i
     );
     if (likesMatch) userLikes = addUnique(userLikes, likesMatch[1], 5);
 
     // ── Dislikes ──────────────────────────────────────────────────────────────
-    // Handles casual variants: "i rlly hate X", "dont like X", "cant stand X",
-    // "not rly into X", "not a fan of X", "pls dont talk about X"
-    const dislikesMatch = userText.match(
-      /\b(?:i (?:(?:really|rlly|rly|honestly|literally|seriously|lowkey|kinda|actually|deadass) )?(?:hate|dislike|despise|can'?t stand|cant stand)|i (?:don'?t|do not|dont) (?:(?:really|rlly|rly) )?(?:like|liek|love|luv|enjoy|want|care (?:for|about))|(?:(?:i'?m|im) )?not (?:(?:really|rlly|rly) )?(?:a fan of|into|feeling)|i(?:'ve| have)? never (?:(?:really|rlly) )?liked?|(?:pls |please )?(?:don'?t|dont|do not) (?:talk|ask|mention|bring up)(?:\s+(?:about|me about))?)\s+([^,.!?\n]{2,50})/i
+    // "i (really) hate/dislike/despise/can't stand X", "i don't like X",
+    // "not a fan of X", "i've never liked X", "pls don't talk about X"
+    const dislikesMatch = norm.match(
+      /\b(?:i\s+(?:(?:really|rlly|rly|honestly|literally|seriously|lowkey|kinda|actually|deadass)\s+)?(?:hate|dislike|despise|can'?t\s+stand|cant\s+stand)|i\s+(?:don'?t|do\s+not|dont)\s+(?:(?:really|rlly|rly)\s+)?(?:like|liek|love|luv|enjoy|want|care\s+(?:for|about))|(?:(?:i'?m|im)\s+)?not\s+(?:(?:really|rlly|rly)\s+)?(?:a\s+(?:big\s+)?fan\s+of|into|feeling)|i(?:'ve|\s+have)?\s+never\s+(?:(?:really|rlly)\s+)?liked?|(?:pls\s+|please\s+)?(?:don'?t|dont|do\s+not)\s+(?:talk|ask|mention|bring\s+up)(?:\s+(?:about|me\s+about))?)\s+([^,.!?\n]{2,40})/i
     );
     if (dislikesMatch) userDislikes = addUnique(userDislikes, dislikesMatch[1], 5);
 
     // ── Favorite topics ───────────────────────────────────────────────────────
-    // Handles casual variants: "im rlly into X", "im super into X",
-    // "im big on X", "passionate about X", "i love talking about X"
-    const topicMatch = userText.match(
-      /\b(?:(?:i'?m|im) (?:(?:really|rlly|rly|so|super|lowkey|highkey) )?into|i am (?:(?:really|rlly|rly|so|super) )?into|i love talking about|my favou?rite thing is|(?:(?:i'?m|im) )?passionate about|(?:i'?m|im) (?:(?:really|rlly|rly) )?(?:big|huge) on)\s+([^,.!?\n]{2,50})/i
+    // "i'm (really) into X", "i love talking about X", "my favourite thing is X",
+    // "i'm passionate about X", "i'm big on X", "i nerd out about/on/over X",
+    // "i (really) enjoy talking about X"
+    const topicMatch = norm.match(
+      /\b(?:(?:i'?m|im)\s+(?:(?:really|rlly|rly|so|super|lowkey|highkey)\s+)?into|i\s+am\s+(?:(?:really|rlly|rly|so|super)\s+)?into|i\s+(?:really\s+)?love\s+talking\s+about|my\s+favou?rite\s+thing(?:\s+to\s+talk\s+about)?\s+is|(?:i'?m|im)\s+obsessed\s+with|i\s+(?:really\s+)?enjoy\s+talking\s+about|(?:i'?m|im)\s+(?:(?:really|rlly|rly)\s+)?(?:big|huge)\s+on|(?:(?:i'?m|im)\s+)?passionate\s+about|i\s+nerd\s+out\s+(?:about|on|over))\s+([^,.!?\n]{2,40})/i
     );
     if (topicMatch) userFavoriteTopics = addUnique(userFavoriteTopics, topicMatch[1], 5);
 
     // ── Life / status updates ─────────────────────────────────────────────────
-    // Broadly captures status, health, school, work, sleep, travel, mood
-    const lifeMatch = userText.match(
-      /\b(?:i(?:'?m| am) (?:sick|ill|tired|sleepy|busy|stressed|overwhelmed|anxious|nervous|bored|depressed|exhausted|lonely|moving|traveling|on (?:vacation|holiday|break|a trip)|at (?:work|school|the (?:hospital|doctor|dentist))|not feeling (?:well|good|great)|feeling (?:sick|down|sad|unwell|better|worse))|(?:i )?(?:have|got|gotta) (?:an? )?(?:exam|test|quiz|homework|practice|class|appointment|deadline|interview|meeting)|i (?:just )?got (?:back|home|off work|off school)|(?:i )?can'?t sleep|(?:i'?m |im )?going to (?:bed|sleep)|(?:i )?just woke up|(?:i'?m |im )?(?:studying|running late))\b[^.!?\n]{0,60}/i
+    // Broadly captures status, health, school, work, sleep, travel, mood, and life events.
+    const lifeMatch = norm.match(
+      /\b(?:i'?(?:ve|\s+have)\s+(?:an?\s+)?(?:exam|test|deadline|meeting|job\s+interview|interview|cold|flu|covid|headache|fever|migraine|appointment|date|presentation|demo)|i'?m\s+(?:sick|ill|not\s+feeling\s+well|tired|exhausted|stressed|depressed|sad|happy|excited|nervous|anxious|bored|lonely|busy|free|at\s+work|at\s+school|at\s+uni(?:versity)?|at\s+college|at\s+home|at\s+the\s+(?:gym|hospital|doctor'?s?|dentist'?s?|airport|beach|park|office|library|store|mall)|travel(?:l?ing)|on\s+(?:vacation|holiday|a\s+trip)|going\s+to\s+(?:sleep|bed|work|school)|heading\s+(?:to\s+(?:bed|work|school)|home|out)|running\s+late|late\s+today|free\s+today|moving(?:\s+(?:house|out|away))?|cooking|studying|cramming|working\s+out|hungover|on\s+my\s+way|about\s+to\s+(?:leave|sleep|eat|go))|i\s+am\s+(?:sick|ill|not\s+feeling\s+well|tired|exhausted|stressed|depressed|sad|happy|excited|nervous|anxious|bored|lonely|busy|free|at\s+work|at\s+school|travel(?:l?ing)|on\s+(?:vacation|holiday|a\s+trip))|i\s+just\s+(?:got\s+(?:home|back|fired|hired|promoted|married|dumped|engaged|divorced)|woke\s+up|finished|graduated|started|moved|broke\s+up|had\s+a\s+baby)|today\s+is\s+my\s+birthday|it'?s\s+my\s+birthday|i\s+(?:just\s+)?broke\s+(?:my|a)\s+\w+|i\s+(?:lost|found)\s+my\s+(?:job|phone|wallet|keys)|can'?t\s+sleep|going\s+to\s+(?:bed|sleep)|just\s+woke\s+up|studying|running\s+late)\b[^.!?\n]{0,60}/i
     );
     if (lifeMatch) userLastPersonalUpdate = lifeMatch[0].trim().toLowerCase();
 
@@ -296,16 +329,44 @@ function extractUserInfo(
     userConversationStyle.messageLength = msgLen < 25 ? "short" : msgLen > 120 ? "long" : "medium";
 
     // ── Conversation style — tone ─────────────────────────────────────────────
-    // Note: \b doesn't work with emoji (not word chars), so emoji are checked outside \b
-    if (/(?:\b(?:haha+|lol+|hehe+|lmao+|lmfao|rofl|bruh)\b|\bi'?m (?:dead|dying|crying)\b|😂|😭|🤣|💀)/i.test(userText)) {
+    // Handles elongated laughs (hahaha, hehehe), slang (bruh, omg, ikr, fr fr, xD)
+    // Note: emoji checked separately since \b doesn't work on emoji chars
+    if (/(?:\b(?:lol+|lmao+|lmfao|rofl|omg|ikr|bruh)\b|\bfr\s+fr\b|\bha(?:ha)+h?\b|\bhe(?:he)+h?\b|[xX]+[dD]+(?:\b|$)|\bi'?m\s+(?:dead|dying|crying)\b|😂|😭|🤣|💀)/i.test(norm)) {
       userConversationStyle.tone = "playful";
     }
 
     // ── Relationship style ────────────────────────────────────────────────────
     // Catches caring/protective language: "poor icub", "are you okay", "awww",
-    // "hang in there", "i feel bad for you", "that's so sad", "i'll feed you"
-    if (/(?:\b(?:poor (?:i[- ]?cub|thing|baby|little guy)|are you (?:ok|okay|alright)|(?:i'?ll|ill|i will|i can|i'?d(?: love to)?) (?:come )?feed you|don'?t worry|hope you(?:'re| are) (?:ok|okay|alright)|wish i could (?:help|be there|feed you)|i(?:'d| would) come|i want to (?:help|feed you)|hang in there|stay strong|i feel (?:bad|sorry) for you|that(?:'s| is) so sad)\b|\baww+\b)/i.test(userText)) {
+    // "hang in there", "i feel bad for you", "take care", "feel better", etc.
+    if (/(?:\b(?:poor\s+(?:i[- ]?cub|thing|baby|robot|lil|little(?:\s+guy)?)|are\s+you\s+(?:ok|okay|alright)|(?:i'?ll|ill|i\s+will|i\s+can|i'?d(?:\s+love\s+to)?)\s+(?:come\s+)?feed\s+you|is\s+someone\s+feeding\s+you|don'?t\s+worry(?:\s+about\s+it)?|hope\s+you(?:'re|\s+are)\s+(?:ok|okay|alright)|wish\s+i\s+could\s+(?:help|be\s+there|feed\s+you)|i(?:'d|\s+would)\s+come|i\s+want\s+to\s+(?:help|feed\s+you)|hang\s+in\s+there|stay\s+strong|i\s+feel\s+(?:bad|sorry)\s+for\s+you|that(?:'s|\s+is)\s+so\s+sad|take\s+care(?:\s+of\s+yourself)?|feel\s+better)\b|\baww+\b|(?:\boh\s+no\b|\baww+\b),?\s*(?:poor|are\s+you\s+ok))/i.test(norm)) {
       userRelationshipStyle = "protective";
+    }
+
+    // ── Inside jokes ──────────────────────────────────────────────────────────
+    // "remember when we/you X", "that's our inside joke", "the X thing",
+    // "we always say X", "like that time we X"
+    const jokeMatch = norm.match(
+      /\b(?:remember\s+(?:when\s+(?:we|you)|that\s+time\s+(?:we|you)|the\s+time\s+(?:we|you)))\s+([^.!?\n]{3,60})|(?:that'?s\s+(?:our|an?)\s+(?:inside\s+)?(?:joke|thing)|our\s+inside\s+joke)\b[:\s]*([^.!?\n]{0,60})|(?:(?:lol|haha|lmao|hehe)\s+)the\s+([\w\s'-]{3,40})\s+thing\b|we\s+always\s+(?:say|do|call\s+(?:it|that))\s+([^.!?\n]{3,50})|like\s+that\s+time\s+(?:when\s+)?(?:we|you)\s+([^.!?\n]{3,60})/i
+    );
+    if (jokeMatch) {
+      const rawJoke = jokeMatch.slice(1).find((g) => g != null) ?? null;
+      if (rawJoke) {
+        const joke = cleanPhrase(rawJoke, 80);
+        if (isMeaningful(joke, 3) && !userInsideJokes.some((j) => joke.includes(j) || j.includes(joke))) {
+          userInsideJokes.push(joke);
+          if (userInsideJokes.length > 5) userInsideJokes.shift();
+        }
+      }
+    }
+
+    // ── Trust level ───────────────────────────────────────────────────────────
+    // Escalates to "close_friend" on explicit trust signals: confiding, sharing secrets,
+    // declaring closeness, or expressing deep emotional comfort.
+    const TRUST_RANK: Record<string, number> = { friend: 0, close_friend: 1 };
+    if ((TRUST_RANK[userTrustLevel] ?? 0) < TRUST_RANK["close_friend"]) {
+      if (/\b(?:i\s+(?:really\s+)?trust\s+you|i\s+can\s+trust\s+you|you'?re\s+(?:the\s+)?only\s+(?:one|person)\s+i\s+(?:can\s+)?(?:talk|open\s+up|vent)\s+to|i\s+feel\s+(?:so\s+)?(?:comfortable|safe|at\s+ease)\s+(?:with\s+you|talking\s+to\s+you)|i'?ve\s+never\s+told\s+(?:anyone|anybody)(?:\s+(?:this|before|else))?|nobody\s+(?:else\s+)?knows\s+(?:this|about\s+this)|(?:don'?t|pls\s+don'?t|please?\s+don'?t)\s+tell\s+(?:anyone|anybody)|(?:this|it)\s+(?:is|stays?)\s+between\s+us|keep\s+(?:this|it)\s+between\s+us|(?:this\s+is|it'?s)\s+a\s+secret|you'?re\s+(?:my\s+)?(?:best|closest)\s+friend|i\s+(?:can|could)\s+tell\s+you\s+(?:anything|everything)|you\s+(?:really\s+)?(?:get|understand)\s+me|(?:you'?re\s+)?the\s+only\s+(?:one|person)\s+(?:who|that)\s+(?:gets|understands)\s+me|i\s+(?:really\s+)?(?:love|appreciate)\s+talking\s+to\s+you|you\s+mean\s+(?:a\s+lot|so\s+much|everything)\s+to\s+me|i\s+don'?t\s+know\s+what\s+i'?d\s+do\s+without\s+you)\b/i.test(norm)) {
+        userTrustLevel = "close_friend";
+      }
     }
   }
 
@@ -318,6 +379,7 @@ function extractUserInfo(
     userFavoriteTopics: userFavoriteTopics.length > 0 ? userFavoriteTopics : undefined,
     userRelationshipStyle,
     userInsideJokes: userInsideJokes.length > 0 ? userInsideJokes : undefined,
+    userTrustLevel,
     userLastPersonalUpdate,
     userConversationStyle,
     userFirstTalked,
@@ -366,6 +428,9 @@ function buildUserContext(profile: UserProfile): string {
 
   const jokes = safeList(profile.userInsideJokes, 3);
   if (jokes.length > 0) parts.push(`Shared inside joke: ${jokes[jokes.length - 1]}.`);
+
+  const trust = safeStr(profile.userTrustLevel);
+  if (trust === "close_friend") parts.push("The user considers iCub a close, trusted friend.");
 
   const cs = profile.userConversationStyle;
   if (cs) {
@@ -591,7 +656,8 @@ export default {
               userName: m.userName, userNickname: m.userNickname, userAge: m.userAge,
               userLikes: m.userLikes, userDislikes: m.userDislikes,
               userFavoriteTopics: m.userFavoriteTopics, userRelationshipStyle: m.userRelationshipStyle,
-              userInsideJokes: m.userInsideJokes, userLastPersonalUpdate: m.userLastPersonalUpdate,
+              userInsideJokes: m.userInsideJokes, userTrustLevel: m.userTrustLevel,
+              userLastPersonalUpdate: m.userLastPersonalUpdate,
               userConversationStyle: m.userConversationStyle,
               userFirstTalked: m.userFirstTalked, userLastTalked: m.userLastTalked,
             };
@@ -627,7 +693,8 @@ export default {
               userName: m.userName, userNickname: m.userNickname, userAge: m.userAge,
               userLikes: m.userLikes, userDislikes: m.userDislikes,
               userFavoriteTopics: m.userFavoriteTopics, userRelationshipStyle: m.userRelationshipStyle,
-              userInsideJokes: m.userInsideJokes, userLastPersonalUpdate: m.userLastPersonalUpdate,
+              userInsideJokes: m.userInsideJokes, userTrustLevel: m.userTrustLevel,
+              userLastPersonalUpdate: m.userLastPersonalUpdate,
               userConversationStyle: m.userConversationStyle,
               userFirstTalked: m.userFirstTalked, userLastTalked: m.userLastTalked,
             };
@@ -658,7 +725,7 @@ export default {
       const fromName = msg.from?.first_name || msg.from?.username;
       const userProfile = extractUserInfo(memory, fromName, text);
       const { userName, userNickname, userAge, userLikes, userDislikes,
-              userFavoriteTopics, userRelationshipStyle, userInsideJokes,
+              userFavoriteTopics, userRelationshipStyle, userInsideJokes, userTrustLevel,
               userLastPersonalUpdate, userConversationStyle,
               userFirstTalked, userLastTalked } = userProfile;
 
@@ -744,6 +811,7 @@ export default {
               userFavoriteTopics,
               userRelationshipStyle,
               userInsideJokes,
+              userTrustLevel,
               userLastPersonalUpdate,
               userConversationStyle,
               userFirstTalked,
@@ -771,6 +839,7 @@ export default {
         memory.userFavoriteTopics = userFavoriteTopics;
         memory.userRelationshipStyle = userRelationshipStyle;
         memory.userInsideJokes = userInsideJokes;
+        memory.userTrustLevel = userTrustLevel;
         memory.userLastPersonalUpdate = userLastPersonalUpdate;
         memory.userConversationStyle = userConversationStyle;
         memory.userFirstTalked = userFirstTalked;
