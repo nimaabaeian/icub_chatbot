@@ -29,6 +29,15 @@ Notes:
 - The bot tries `lastGoodModel` first when available, then follows the order above.
 - Summarization uses the first non-Gemma model from this list.
 
+## Major Features
+
+- Per-chat long memory in KV with rolling transcript + rolling summary.
+- User profile memory (`userName`, `userAge`, likes, dislikes) extracted from messages and reused in replies.
+- Sticky successful model selection via `lastGoodModel` to improve response reliability/latency.
+- Pending-message recovery: if all models fail, the last user message is saved and surfaced on the next turn.
+- Telegram reliability guards: webhook secret verification + `update_id` deduplication.
+- `/start` reset flow that clears conversation state but preserves known user profile.
+
 ## Directory Structure
 
 ```
@@ -103,9 +112,8 @@ The worker calls Telegram's `setWebhook` and returns the result as JSON.
 4. **Extract user profile** — name, age, likes, dislikes parsed from message text and Telegram metadata; persisted across sessions
 5. **Ambiguity rewrite** — short affirmatives ("yep", "sure") are expanded before sending to the model
 6. **Model cascade** — tries `MODELS_TO_TRY` in order, sticky on `lastGoodModel`
-7. **Action tags** — strips `[WAVE]`, `[GAZE_AT_USER]` etc. from model output and forwards to robot controller (currently a console log placeholder)
-8. **Reply** — clamps to 450 chars, sends via Telegram `sendMessage`
-9. **Background write** — `ctx.waitUntil()` runs summarisation + KV save without blocking the response
+7. **Reply** — clamps to 450 chars, sends via Telegram `sendMessage`
+8. **Background write** — `ctx.waitUntil()` runs summarisation + KV save without blocking the response
 
 ### Model fallback
 
@@ -122,12 +130,15 @@ The worker calls Telegram's `setWebhook` and returns the result as JSON.
 |---|---|
 | `messages` | Rolling window of last 20 turns (full history) |
 | `summary` | LLM-generated rolling summary, updated every 8 new turns |
+| `turnCount` | Total successful turns stored so far |
+| `lastSummarizedAt` | `turnCount` checkpoint of the last summary update |
 | `lastGoodModel` | Sticky model selection for the next request |
 | `userName` | Captured from Telegram metadata or "call me X" / "my name is X" |
 | `userAge` | Captured from "I'm X years old" |
 | `userLikes` | Up to 5 things the user mentioned liking/loving/enjoying |
 | `userDislikes` | Up to 5 things the user mentioned hating/disliking |
-| `pendingUser` | Stores the last message if all models fail; recovered on the next message |
+| `pendingUser` | Stores the last message if all models fail; recovered on the next message (10 min window) |
+| `updatedAt` | Last memory write timestamp (ms epoch) |
 
 Only the last 6 messages (`CONTEXT_WINDOW`) are forwarded to the model per call; the rest is covered by the rolling summary.
 

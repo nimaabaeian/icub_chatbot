@@ -94,23 +94,6 @@ function clampForTelegram(text: string): string {
   return `${trimmed.slice(0, keepLen).trimEnd()}${suffix}`;
 }
 
-/**
- * Split trailing action tags from model output.
- * Returns { spoken, action } where action is the bare tag name or null.
- */
-function splitActionTag(text: string): { spoken: string; action: string | null } {
-  const trimmed = text.trim();
-  if (!trimmed) return { spoken: trimmed, action: null };
-  const lines = trimmed.split(/\r?\n/);
-  let action: string | null = null;
-  while (lines.length > 0) {
-    const last = lines[lines.length - 1].trim();
-    const m = last.match(/^\[(GAZE_AT_USER|GAZE_AT_OBJECT|WAVE|POINT|REACH|STOP_MOVING)\]$/);
-    if (m) { action = action ?? m[1]; lines.pop(); } else break;
-  }
-  return { spoken: lines.join("\n").trim() || trimmed, action };
-}
-
 /** Pick a random element from an array. */
 function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -143,11 +126,6 @@ function rewriteForClarity(userText: string, lastAssistant: string | undefined):
   if (corrected && lastAssistant.toLowerCase().includes(corrected)) return corrected;
 
   return userText;
-}
-
-/** Placeholder: forward action tag to the robot controller. */
-function sendRobotAction(chatId: number, action: string): void {
-  console.log("[ROBOT ACTION] chatId:", chatId, "action:", action);
 }
 
 async function sendTelegramMessage(token: string, chatId: number, text: string): Promise<void> {
@@ -521,17 +499,13 @@ export default {
         }
         if (!result.ok) continue;
 
-        const { spoken, action } = splitActionTag(result.content);
-        console.log("Action tag:", action ?? "none", "| chatId:", chatId);
-
-        reply = clampForTelegram(spoken || "Hmm, I did not quite get that. Can you say it again?");
-        if (action) sendRobotAction(chatId, action);
+        reply = clampForTelegram(result.content || "Hmm, I did not quite get that. Can you say it again?");
 
         // Update history
         const updatedHistory: ChatMessage[] = [
           ...history,
           { role: "user" as const, content: text },
-          { role: "assistant" as const, content: spoken },
+          { role: "assistant" as const, content: result.content },
         ].slice(-MAX_TURNS);
 
         const newTurnCount = (memory.turnCount ?? 0) + 1;
