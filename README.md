@@ -35,11 +35,21 @@ Notes:
 - Sticky successful model selection via `lastGoodModel` to improve response reliability/latency.
 - Pending-message recovery: if all models fail, the last user message is saved and surfaced on the next turn.
 - Telegram reliability guards: webhook secret verification + `update_id` deduplication.
-- `/start` reset flow that clears conversation state but preserves the known user profile.
+- `/start` clears conversation history but preserves the full user profile.
+- `/reset` does the same as `/start` without a greeting — useful mid-conversation.
+- In-character fallback replies when all models fail — iCub never exposes backend errors to the user.
 
 ## Memory
 
-All state is stored per-chat in the `CHAT_MEMORY` KV namespace with a 24-hour TTL. Memory is loaded at the start of each request and written back asynchronously via `ctx.waitUntil()`.
+State is stored per-chat in the `CHAT_MEMORY` KV namespace under **two separate keys**:
+
+| Key | TTL | Contents |
+|---|---|---|
+| `chat:<id>` | 24 h | Conversation history, summary, turn counters, sticky model |
+| `profile:<id>` | **none** (kept forever) | Full user profile — survives `/start` and `/reset` |
+| `dedupe:<update_id>` | 5 min | Deduplication sentinel |
+
+Memory is loaded at the start of each request and written back asynchronously via `ctx.waitUntil()`.
 
 ### Chat state
 
@@ -53,7 +63,7 @@ All state is stored per-chat in the `CHAT_MEMORY` KV namespace with a 24-hour TT
 | `pendingUser` | Last user message saved when all models fail; recovered within 10 min |
 | `updatedAt` | Timestamp (ms epoch) of the last KV write |
 
-Only the most recent 6 messages (`CONTEXT_WINDOW`) are forwarded to the model; older context is covered by the rolling summary.
+Only the most recent 6 messages (`CONTEXT_WINDOW`) are forwarded to the model; older context is covered by the rolling summary. Summarisation is **incremental** — only the turns added since the last summary are sent to the summariser, preventing drift over long conversations.
 
 ### User profile
 
@@ -63,14 +73,14 @@ Extracted automatically from every message via regex patterns and Telegram metad
 |---|---|
 | `userName` | Display name from Telegram or patterns like "call me X", "my name is X" |
 | `userNickname` | Preferred nickname — "just call me X", "my friends call me X", etc. |
-| `userAge` | Age captured from a wide range of expressions: "I'm 23", "just turned 18", "turning 25 soon", etc. |
+| `userAge` | Age captured from a wide range of expressions: "I'm 23", "just turned 18", "turning 25 soon", etc. (valid range: 5–120) |
 | `userLikes` | Up to 5 things the user mentioned liking / loving / enjoying |
-| `userDislikes` | Up to 5 things the user mentioned hating / disliking |
+| `userDislikes` | Up to 5 things the user mentioned hating / disliking / can't stand |
 | `userFavoriteTopics` | Up to 5 topics the user is into ("I'm really into X", "I nerd out about X", etc.) |
 | `userRelationshipStyle` | Detected interaction style, e.g. `"protective"` |
 | `userInsideJokes` | Up to 5 shared references or inside jokes spotted in the conversation |
 | `userTrustLevel` | `"friend"` (default) or `"close_friend"` — escalates on explicit trust signals |
-| `userLastPersonalUpdate` | Most recent life/status snippet ("I have an exam tomorrow", "just woke up", etc.) |
+| `userLastPersonalUpdate` | Most recent life/status snippet — covers health, mood, location, school/work, travel, and life events ("I've got an exam", "i'm drunk", "just got promoted", "i'm pregnant", etc.) |
 | `userConversationStyle` | `{ usesEmojis, messageLength, tone }` — inferred from message content |
 | `userFirstTalked` | Timestamp (ms epoch) of the user's first message |
 | `userLastTalked` | Timestamp (ms epoch) of the user's most recent message |
@@ -141,9 +151,17 @@ The worker calls Telegram's `setWebhook` and returns the result as JSON.
 
 ## Architecture
 
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/` | Health check — returns `ok` |
+| `GET` | `/setup?secret=<SETUP_SECRET>` | Registers the Telegram webhook |
+| `POST` | `/webhook` | Receives Telegram updates (the hot path) |
+
 ### Webhook flow
 
-`POST /webhook` is the only hot path:
+`POST /webhook` hot path:
 
 1. **Verify** — checks `X-Telegram-Bot-Api-Secret-Token`
 2. **Deduplicate** — `update_id` cached in KV for 5 min prevents double-processing
@@ -175,6 +193,13 @@ Models with the `google/gemma-` prefix reject system-role messages. For these, t
 | `OPENROUTER_API_KEY` | OpenRouter API auth |
 | `WEBHOOK_SECRET` | Header token Telegram sends with every update |
 | `SETUP_SECRET` | Guards the `/setup` endpoint |
+
+Optional plain env vars (set in `wrangler.jsonc` under `vars` or via `wrangler secret put`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `APP_NAME` | `"iCub Telegram Bot"` | Sent as `X-OpenRouter-Title` header |
+| `APP_URL` | `"https://example.com"` | Sent as `HTTP-Referer` header |
 
 > Secrets are set via `wrangler secret put` and never committed to git.
 
