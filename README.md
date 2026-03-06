@@ -31,12 +31,51 @@ Notes:
 
 ## Major Features
 
-- Per-chat long memory in KV with rolling transcript + rolling summary.
-- User profile memory (`userName`, `userAge`, likes, dislikes) extracted from messages and reused in replies.
+- Per-chat persistent memory in KV: rolling transcript, rolling summary, and a rich user profile.
 - Sticky successful model selection via `lastGoodModel` to improve response reliability/latency.
 - Pending-message recovery: if all models fail, the last user message is saved and surfaced on the next turn.
 - Telegram reliability guards: webhook secret verification + `update_id` deduplication.
-- `/start` reset flow that clears conversation state but preserves known user profile.
+- `/start` reset flow that clears conversation state but preserves the known user profile.
+
+## Memory
+
+All state is stored per-chat in the `CHAT_MEMORY` KV namespace with a 24-hour TTL. Memory is loaded at the start of each request and written back asynchronously via `ctx.waitUntil()`.
+
+### Chat state
+
+| Field | Purpose |
+|---|---|
+| `messages` | Rolling window of the last 20 turns |
+| `summary` | LLM-generated rolling summary, regenerated every 8 new turns |
+| `turnCount` | Total successful turns stored so far |
+| `lastSummarizedAt` | `turnCount` value at the last summary update |
+| `lastGoodModel` | Sticky model choice tried first on the next request |
+| `pendingUser` | Last user message saved when all models fail; recovered within 10 min |
+| `updatedAt` | Timestamp (ms epoch) of the last KV write |
+
+Only the most recent 6 messages (`CONTEXT_WINDOW`) are forwarded to the model; older context is covered by the rolling summary.
+
+### User profile
+
+Extracted automatically from every message via regex patterns and Telegram metadata. Profiles survive `/start` resets.
+
+| Field | Purpose |
+|---|---|
+| `userName` | Display name from Telegram or patterns like "call me X", "my name is X" |
+| `userNickname` | Preferred nickname — "just call me X", "my friends call me X", etc. |
+| `userAge` | Age captured from a wide range of expressions: "I'm 23", "just turned 18", "turning 25 soon", etc. |
+| `userLikes` | Up to 5 things the user mentioned liking / loving / enjoying |
+| `userDislikes` | Up to 5 things the user mentioned hating / disliking |
+| `userFavoriteTopics` | Up to 5 topics the user is into ("I'm really into X", "I nerd out about X", etc.) |
+| `userRelationshipStyle` | Detected interaction style, e.g. `"protective"` |
+| `userInsideJokes` | Up to 5 shared references or inside jokes spotted in the conversation |
+| `userTrustLevel` | `"friend"` (default) or `"close_friend"` — escalates on explicit trust signals |
+| `userLastPersonalUpdate` | Most recent life/status snippet ("I have an exam tomorrow", "just woke up", etc.) |
+| `userConversationStyle` | `{ usesEmojis, messageLength, tone }` — inferred from message content |
+| `userFirstTalked` | Timestamp (ms epoch) of the user's first message |
+| `userLastTalked` | Timestamp (ms epoch) of the user's most recent message |
+
+---
 
 ## Directory Structure
 
@@ -109,7 +148,7 @@ The worker calls Telegram's `setWebhook` and returns the result as JSON.
 1. **Verify** — checks `X-Telegram-Bot-Api-Secret-Token`
 2. **Deduplicate** — `update_id` cached in KV for 5 min prevents double-processing
 3. **Load memory** — reads `ChatMemory` from KV for the chat
-4. **Extract user profile** — name, age, likes, dislikes parsed from message text and Telegram metadata; persisted across sessions
+4. **Extract user profile** — name, nickname, age, likes, dislikes, favourite topics, relationship style, inside jokes, trust level, life/status updates, conversation style (emoji usage, message length, tone), and interaction timestamps parsed from message text and Telegram metadata; persisted across sessions
 5. **Ambiguity rewrite** — short affirmatives ("yep", "sure") are expanded before sending to the model
 6. **Model cascade** — tries `MODELS_TO_TRY` in order, sticky on `lastGoodModel`
 7. **Reply** — clamps to 450 chars, sends via Telegram `sendMessage`
@@ -123,24 +162,6 @@ The worker calls Telegram's `setWebhook` and returns the result as JSON.
 - Transient codes (429, 5xx): retry → next model
 - 404: skip model immediately
 - 401/402/403: abort entire loop, send friendly in-character fallback
-
-### Conversation memory (`CHAT_MEMORY` KV, 24 h TTL)
-
-| Field | Purpose |
-|---|---|
-| `messages` | Rolling window of last 20 turns (full history) |
-| `summary` | LLM-generated rolling summary, updated every 8 new turns |
-| `turnCount` | Total successful turns stored so far |
-| `lastSummarizedAt` | `turnCount` checkpoint of the last summary update |
-| `lastGoodModel` | Sticky model selection for the next request |
-| `userName` | Captured from Telegram metadata or "call me X" / "my name is X" |
-| `userAge` | Captured from "I'm X years old" |
-| `userLikes` | Up to 5 things the user mentioned liking/loving/enjoying |
-| `userDislikes` | Up to 5 things the user mentioned hating/disliking |
-| `pendingUser` | Stores the last message if all models fail; recovered on the next message (10 min window) |
-| `updatedAt` | Last memory write timestamp (ms epoch) |
-
-Only the last 6 messages (`CONTEXT_WINDOW`) are forwarded to the model per call; the rest is covered by the rolling summary.
 
 ### Systemless model handling (Gemma)
 
