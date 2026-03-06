@@ -8,6 +8,8 @@ const TELEGRAM_MAX_CHARS = 450;
 const MAX_RETRIES_PER_MODEL = 2;
 const SUMMARY_EVERY_N = 8;      // summarise after this many NEW turns since last summary
 const PENDING_TTL_MS = 10 * 60 * 1000; // 10 min window for pending-message recovery
+const JOKE_CANDIDATE_TTL_MS = 30 * 24 * 3600 * 1000; // 30 days — expire unconfirmed joke candidates
+const JOKE_CANDIDATE_MAX = 20;  // max pending candidates per user
 
 const TRANSIENT_HTTP_CODES = new Set([408, 429, 500, 502, 503, 504, 520, 522, 524]);
 const SKIP_HTTP_CODES = new Set([404]);          // model gone — skip immediately
@@ -38,6 +40,7 @@ type UserProfile = {
   userFavoriteTopics?: string[];
   userRelationshipStyle?: string;
   userInsideJokes?: string[];
+  userJokeCandidates?: Record<string, [number, number]>; // phrase -> [count, first_seen_ms]; promoted at 2+
   userTrustLevel?: string;        // "friend" | "close_friend" (default: "friend")
   userLastPersonalUpdate?: string;
   userConversationStyle?: UserConversationStyle;
@@ -60,6 +63,7 @@ type ChatMemory = {
   userFavoriteTopics?: string[];  // up to 5 topics the user is into
   userRelationshipStyle?: string; // e.g. "protective"
   userInsideJokes?: string[];     // shared inside jokes
+  userJokeCandidates?: Record<string, [number, number]>; // phrase -> [count, first_seen_ms]
   userTrustLevel?: string;        // "friend" | "close_friend"
   userLastPersonalUpdate?: string;// e.g. "i have an exam tomorrow"
   userConversationStyle?: UserConversationStyle;
@@ -210,6 +214,9 @@ function extractUserInfo(
   let userFavoriteTopics: string[] = memory.userFavoriteTopics ? [...memory.userFavoriteTopics] : [];
   let userRelationshipStyle = memory.userRelationshipStyle;
   const userInsideJokes: string[] = memory.userInsideJokes ? [...memory.userInsideJokes] : [];
+  const jokeCandidates: Record<string, [number, number]> = memory.userJokeCandidates
+    ? { ...memory.userJokeCandidates }
+    : {};
   let userTrustLevel = memory.userTrustLevel ?? "friend";
   let userLastPersonalUpdate = memory.userLastPersonalUpdate;
   const userConversationStyle: UserConversationStyle = memory.userConversationStyle
@@ -346,8 +353,10 @@ function extractUserInfo(
     }
 
     // ── Inside jokes ──────────────────────────────────────────────────────────
-    // "remember when we/you X", "that's our inside joke", "the X thing",
-    // "we always say X", "like that time we X"
+    // Catches explicit shared-memory references:
+    // "remember when we/you X", "that's our joke/thing",
+    // "haha the X thing", "we always say X", "like that time we X"
+    // A phrase must be mentioned 2+ times before it is confirmed as an inside joke.
     const jokeMatch = norm.match(
       /\b(?:remember\s+(?:when\s+(?:we|you)|that\s+time\s+(?:we|you)|the\s+time\s+(?:we|you)))\s+([^.!?\n]{3,60})|(?:that'?s\s+(?:our|an?)\s+(?:inside\s+)?(?:joke|thing)|our\s+inside\s+joke)\b[:\s]*([^.!?\n]{0,60})|(?:(?:lol|haha|lmao|hehe)\s+)the\s+([\w\s'-]{3,40})\s+thing\b|we\s+always\s+(?:say|do|call\s+(?:it|that))\s+([^.!?\n]{3,50})|like\s+that\s+time\s+(?:when\s+)?(?:we|you)\s+([^.!?\n]{3,60})/i
     );
@@ -355,9 +364,41 @@ function extractUserInfo(
       const rawJoke = jokeMatch.slice(1).find((g) => g != null) ?? null;
       if (rawJoke) {
         const joke = cleanPhrase(rawJoke, 80);
-        if (isMeaningful(joke, 3) && !userInsideJokes.some((j) => joke.includes(j) || j.includes(joke))) {
-          userInsideJokes.push(joke);
-          if (userInsideJokes.length > 5) userInsideJokes.shift();
+        if (isMeaningful(joke, 3)) {
+          // Migrate old int-valued candidates (count only) to [count, ts]
+          for (const k of Object.keys(jokeCandidates)) {
+            const v = jokeCandidates[k];
+            if (typeof v === "number") jokeCandidates[k] = [v as unknown as number, now];
+          }
+
+          // Prune expired candidates
+          for (const k of Object.keys(jokeCandidates)) {
+            if (now - jokeCandidates[k][1] > JOKE_CANDIDATE_TTL_MS) delete jokeCandidates[k];
+          }
+
+          // Only store as a confirmed inside joke after 2+ references
+          if (!userInsideJokes.some((j) => joke.includes(j) || j.includes(joke))) {
+            const existingKey = Object.keys(jokeCandidates).find(
+              (k) => joke.includes(k) || k.includes(joke)
+            ) ?? null;
+            if (existingKey !== null) {
+              jokeCandidates[existingKey][0] += 1;
+              if (jokeCandidates[existingKey][0] >= 2) {
+                userInsideJokes.push(existingKey);
+                delete jokeCandidates[existingKey];
+                if (userInsideJokes.length > 5) userInsideJokes.shift();
+              }
+            } else {
+              // Enforce size cap: drop oldest candidate by first-seen timestamp
+              if (Object.keys(jokeCandidates).length >= JOKE_CANDIDATE_MAX) {
+                const oldest = Object.keys(jokeCandidates).reduce((a, b) =>
+                  jokeCandidates[a][1] < jokeCandidates[b][1] ? a : b
+                );
+                delete jokeCandidates[oldest];
+              }
+              jokeCandidates[joke] = [1, now]; // first mention — wait for recurrence
+            }
+          }
         }
       }
     }
@@ -382,6 +423,7 @@ function extractUserInfo(
     userFavoriteTopics: userFavoriteTopics.length > 0 ? userFavoriteTopics : undefined,
     userRelationshipStyle,
     userInsideJokes: userInsideJokes.length > 0 ? userInsideJokes : undefined,
+    userJokeCandidates: Object.keys(jokeCandidates).length > 0 ? jokeCandidates : undefined,
     userTrustLevel,
     userLastPersonalUpdate,
     userConversationStyle,
@@ -589,7 +631,8 @@ function extractProfileData(memory: ChatMemory): Partial<ChatMemory> {
     userName: memory.userName, userNickname: memory.userNickname, userAge: memory.userAge,
     userLikes: memory.userLikes, userDislikes: memory.userDislikes,
     userFavoriteTopics: memory.userFavoriteTopics, userRelationshipStyle: memory.userRelationshipStyle,
-    userInsideJokes: memory.userInsideJokes, userTrustLevel: memory.userTrustLevel,
+    userInsideJokes: memory.userInsideJokes, userJokeCandidates: memory.userJokeCandidates,
+    userTrustLevel: memory.userTrustLevel,
     userLastPersonalUpdate: memory.userLastPersonalUpdate, userConversationStyle: memory.userConversationStyle,
     userFirstTalked: memory.userFirstTalked, userLastTalked: memory.userLastTalked,
   };
@@ -741,8 +784,8 @@ export default {
       const fromName = msg.from?.first_name || msg.from?.username;
       const userProfile = extractUserInfo(memory, fromName, text);
       const { userName, userNickname, userAge, userLikes, userDislikes,
-              userFavoriteTopics, userRelationshipStyle, userInsideJokes, userTrustLevel,
-              userLastPersonalUpdate, userConversationStyle,
+              userFavoriteTopics, userRelationshipStyle, userInsideJokes, userJokeCandidates,
+              userTrustLevel, userLastPersonalUpdate, userConversationStyle,
               userFirstTalked, userLastTalked } = userProfile;
 
       // ── Typing indicator (best-effort, fire-and-forget) ───────────────────
@@ -827,6 +870,7 @@ export default {
               userFavoriteTopics,
               userRelationshipStyle,
               userInsideJokes,
+              userJokeCandidates,
               userTrustLevel,
               userLastPersonalUpdate,
               userConversationStyle,
@@ -853,6 +897,7 @@ export default {
         memory.userFavoriteTopics = userFavoriteTopics;
         memory.userRelationshipStyle = userRelationshipStyle;
         memory.userInsideJokes = userInsideJokes;
+        memory.userJokeCandidates = userJokeCandidates;
         memory.userTrustLevel = userTrustLevel;
         memory.userLastPersonalUpdate = userLastPersonalUpdate;
         memory.userConversationStyle = userConversationStyle;
