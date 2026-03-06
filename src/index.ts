@@ -253,7 +253,7 @@ function extractUserInfo(
 
     // ── Nickname — checked FIRST so it doesn't also fire the name rule ────────
     const nickMatch = norm.match(
-      /\b(?:you can call me|my friends call me|everyone calls me|people call me|just call me|my nickname is|my nick is)\s+([\w'-]{2,20})/i
+      /\b(?:you can call me|my friends call me|everyone calls me|people call me|just call me|my nickname is|my nick is)\s+([\w'-]{2,20})\b/i
     );
     if (nickMatch) {
       userNickname = nickMatch[1].toLowerCase();
@@ -261,7 +261,7 @@ function extractUserInfo(
       // ── Name ──────────────────────────────────────────────────────────────
       // "my name is/my name's/call me/i go by/i'm called/i am called/they call me/the name's X"
       const nameMatch = norm.match(
-        /\b(?:my name'?s|my name is|call me|i go by|i'?m called|i am called|they call me|the name'?s)\s+([\w'-]{2,20})/i
+        /\b(?:my name'?s|my name is|call me|i go by|i'?m called|i am called|they call me|the name'?s)\s+([\w'-]{2,20})\b/i
       );
       if (nameMatch) {
         const n = nameMatch[1];
@@ -274,7 +274,7 @@ function extractUserInfo(
     // Allows up to 3 digits (capped to 120 later); matches "i'm 23", "my age is 30",
     // "i've just turned 18", "turning 25 soon", "i'll be 21 next year", "im 14 yo".
     const ageMatch =
-      norm.match(/\b(?:i'?m|i\s+am)\s+(\d{1,3})(?:\s+y(?:ea)?rs?\s+old)?(?!\s*(?:st|nd|rd|th|min(?:ute)?s?|hours?|hrs?|sec(?:ond)?s?|days?|weeks?|months?|km|miles?|meters?|percent|%|kg|lbs?|cm|mm|pm|am)\b)/i) ??
+      norm.match(/\b(?:i'?m|i\s+am)\s+(\d{1,3})\b(?:\s+y(?:ea)?rs?(?:\s+old)?\b)?(?!\s*(?:st|nd|rd|th|min(?:ute)?s?|hours?|hrs?|sec(?:ond)?s?|days?|weeks?|months?|km|miles?|meters?|percent|%|kg|lbs?|cm|mm|pm|am)\b)/i) ??
       norm.match(/\bmy\s+age\s+is\s+(\d{1,3})\b/i) ??
       norm.match(/\bi(?:'?ve)?\s+just\s+turned\s+(\d{1,3})\b/i) ??
       norm.match(/\bi\s+(?:just\s+)?turned\s+(\d{1,3})\b/i) ??
@@ -285,7 +285,7 @@ function extractUserInfo(
       norm.match(/\bi'?ll\s+be\s+(\d{1,3})\b/i);
     if (ageMatch) {
       const age = parseInt(ageMatch[1], 10);
-      if (age >= 3 && age <= 120) userAge = age;
+      if (age >= 5 && age <= 120) userAge = age;
     }
 
     // ── Likes ─────────────────────────────────────────────────────────────────
@@ -301,7 +301,7 @@ function extractUserInfo(
     // "i (really) hate/dislike/despise/can't stand X", "i don't like X",
     // "not a fan of X", "i've never liked X", "pls don't talk about X"
     const dislikesMatch = norm.match(
-      /\b(?:i\s+(?:(?:really|rlly|rly|honestly|literally|seriously|lowkey|kinda|actually|deadass)\s+)?(?:hate|dislike|despise|can'?t\s+stand|cant\s+stand)|i\s+(?:don'?t|do\s+not|dont)\s+(?:(?:really|rlly|rly)\s+)?(?:like|liek|love|luv|enjoy|want|care\s+(?:for|about))|(?:(?:i'?m|im)\s+)?not\s+(?:(?:really|rlly|rly)\s+)?(?:a\s+(?:big\s+)?fan\s+of|into|feeling)|i(?:'ve|\s+have)?\s+never\s+(?:(?:really|rlly)\s+)?liked?|(?:pls\s+|please\s+)?(?:don'?t|dont|do\s+not)\s+(?:talk|ask|mention|bring\s+up)(?:\s+(?:about|me\s+about))?)\s+([^,.!?\n]{2,40})/i
+      /\b(?:i\s+(?:(?:really|rlly|rly|honestly|literally|seriously|lowkey|kinda|actually|deadass)\s+)?(?:hate|dislike|despise|cannot\s+stand|can'?t\s+stand|cant\s+stand)|i\s+(?:don'?t|do\s+not|dont)\s+(?:(?:really|rlly|rly)\s+)?(?:like|liek|love|luv|enjoy|want|care\s+(?:for|about))|(?:(?:i'?m|im)\s+)?not\s+(?:(?:really|rlly|rly)\s+)?(?:a\s+(?:big\s+)?fan\s+of|into|feeling)|i(?:'ve|\s+have)?\s+never\s+(?:(?:really|rlly)\s+)?liked?|(?:pls\s+|please\s+)?(?:don'?t|dont|do\s+not)\s+(?:talk|ask|mention|bring\s+up)(?:\s+(?:about|me\s+about))?)\s+([^,.!?\n]{2,40})/i
     );
     if (dislikesMatch) userDislikes = addUnique(userDislikes, dislikesMatch[1], 5);
 
@@ -317,7 +317,7 @@ function extractUserInfo(
     // ── Life / status updates ─────────────────────────────────────────────────
     // Broadly captures status, health, school, work, sleep, travel, mood, and life events.
     const lifeMatch = norm.match(
-      /\b(?:i'?(?:ve|\s+have)\s+(?:an?\s+)?(?:exam|test|deadline|meeting|job\s+interview|interview|cold|flu|covid|headache|fever|migraine|appointment|date|presentation|demo)|i'?m\s+(?:sick|ill|not\s+feeling\s+well|tired|exhausted|stressed|depressed|sad|happy|excited|nervous|anxious|bored|lonely|busy|free|at\s+work|at\s+school|at\s+uni(?:versity)?|at\s+college|at\s+home|at\s+the\s+(?:gym|hospital|doctor'?s?|dentist'?s?|airport|beach|park|office|library|store|mall)|travel(?:l?ing)|on\s+(?:vacation|holiday|a\s+trip)|going\s+to\s+(?:sleep|bed|work|school)|heading\s+(?:to\s+(?:bed|work|school)|home|out)|running\s+late|late\s+today|free\s+today|moving(?:\s+(?:house|out|away))?|cooking|studying|cramming|working\s+out|hungover|on\s+my\s+way|about\s+to\s+(?:leave|sleep|eat|go))|i\s+am\s+(?:sick|ill|not\s+feeling\s+well|tired|exhausted|stressed|depressed|sad|happy|excited|nervous|anxious|bored|lonely|busy|free|at\s+work|at\s+school|travel(?:l?ing)|on\s+(?:vacation|holiday|a\s+trip))|i\s+just\s+(?:got\s+(?:home|back|fired|hired|promoted|married|dumped|engaged|divorced)|woke\s+up|finished|graduated|started|moved|broke\s+up|had\s+a\s+baby)|today\s+is\s+my\s+birthday|it'?s\s+my\s+birthday|i\s+(?:just\s+)?broke\s+(?:my|a)\s+\w+|i\s+(?:lost|found)\s+my\s+(?:job|phone|wallet|keys)|can'?t\s+sleep|going\s+to\s+(?:bed|sleep)|just\s+woke\s+up|studying|running\s+late)\b[^.!?\n]{0,60}/i
+      /\b(?:i'?(?:ve|\s+have)\s+(?:got\s+)?(?:an?\s+)?(?:exam|test|deadline|meeting|job\s+interview|interview|cold|flu|covid|headache|fever|migraine|appointment|date|presentation|demo)|i'?m\s+(?:sick|ill|not\s+feeling\s+well|tired|exhausted|stressed|depressed|sad|happy|excited|nervous|anxious|bored|lonely|busy|free|drunk|injured|pregnant|engaged|married|single|at\s+work|at\s+school|at\s+uni(?:versity)?|at\s+college|at\s+home|at\s+the\s+(?:gym|hospital|doctor'?s?|dentist'?s?|airport|beach|park|office|library|store|mall)|travel(?:l?ing)|on\s+(?:vacation|holiday|a\s+trip)|going\s+to\s+(?:sleep|bed|work|school)|heading\s+(?:to\s+(?:bed|work|school)|home|out)|running\s+late|late\s+today|free\s+today|moving(?:\s+(?:house|out|away))?|cooking|studying|cramming|working\s+out|hungover|on\s+my\s+way|about\s+to\s+(?:leave|sleep|eat|go))|i\s+am\s+(?:sick|ill|not\s+feeling\s+well|tired|exhausted|stressed|depressed|sad|happy|excited|nervous|anxious|bored|lonely|busy|free|at\s+work|at\s+school|at\s+uni(?:versity)?|at\s+college|at\s+home|travel(?:l?ing)|on\s+(?:vacation|holiday|a\s+trip))|i\s+just\s+(?:got\s+(?:home|back|fired|hired|promoted|married|dumped|engaged|divorced)|woke\s+up|finished|graduated|started|moved|broke\s+up|had\s+a\s+baby)|today\s+is\s+my\s+birthday|it'?s\s+my\s+birthday|i\s+(?:just\s+)?broke\s+(?:my|a)\s+\w+|i\s+(?:lost|found)\s+my\s+(?:job|phone|wallet|keys)|can'?t\s+sleep|going\s+to\s+(?:bed|sleep)|just\s+woke\s+up|studying|running\s+late)\b[^.!?\n]{0,60}/i
     );
     if (lifeMatch) userLastPersonalUpdate = lifeMatch[0].trim().toLowerCase();
 
@@ -367,7 +367,7 @@ function extractUserInfo(
     // declaring closeness, or expressing deep emotional comfort.
     const TRUST_RANK: Record<string, number> = { friend: 0, close_friend: 1 };
     if ((TRUST_RANK[userTrustLevel] ?? 0) < TRUST_RANK["close_friend"]) {
-      if (/\b(?:i\s+(?:really\s+)?trust\s+you|i\s+can\s+trust\s+you|you'?re\s+(?:the\s+)?only\s+(?:one|person)\s+i\s+(?:can\s+)?(?:talk|open\s+up|vent)\s+to|i\s+feel\s+(?:so\s+)?(?:comfortable|safe|at\s+ease)\s+(?:with\s+you|talking\s+to\s+you)|i'?ve\s+never\s+told\s+(?:anyone|anybody)(?:\s+(?:this|before|else))?|nobody\s+(?:else\s+)?knows\s+(?:this|about\s+this)|(?:don'?t|pls\s+don'?t|please?\s+don'?t)\s+tell\s+(?:anyone|anybody)|(?:this|it)\s+(?:is|stays?)\s+between\s+us|keep\s+(?:this|it)\s+between\s+us|(?:this\s+is|it'?s)\s+a\s+secret|you'?re\s+(?:my\s+)?(?:best|closest)\s+friend|i\s+(?:can|could)\s+tell\s+you\s+(?:anything|everything)|you\s+(?:really\s+)?(?:get|understand)\s+me|(?:you'?re\s+)?the\s+only\s+(?:one|person)\s+(?:who|that)\s+(?:gets|understands)\s+me|i\s+(?:really\s+)?(?:love|appreciate)\s+talking\s+to\s+you|you\s+mean\s+(?:a\s+lot|so\s+much|everything)\s+to\s+me|i\s+don'?t\s+know\s+what\s+i'?d\s+do\s+without\s+you)\b/i.test(norm)) {
+      if (/\b(?:i\s+(?:really\s+)?trust\s+you|i\s+can\s+trust\s+you|you'?re\s+(?:the\s+)?only\s+(?:one|person)\s+i\s+(?:can\s+)?(?:talk|open\s+up|vent)\s+to|i\s+feel\s+(?:so\s+)?(?:comfortable|safe|at\s+ease)\s+(?:with\s+you|talking\s+to\s+you)|i'?ve\s+never\s+told\s+(?:anyone|anybody)(?:\s+(?:this|before|else))?|nobody\s+(?:else\s+)?knows\s+(?:this|about\s+this)|(?:don'?t|pls\s+don'?t|please?\s+don'?t)\s+tell\s+(?:anyone|anybody)|(?:this|it)\s+(?:is|stays?)\s+between\s+us|keep\s+(?:this|it)\s+between\s+us|(?:this\s+is|it'?s)\s+a\s+secret|you'?re\s+(?:my\s+)?(?:best|closest)\s+friend|i\s+(?:can|could)\s+tell\s+you\s+(?:anything|everything)|you\s+(?:really\s+)?(?:get|understand)\s+me|(?:you'?re\s+)?the\s+only\s+(?:one|person)\s+(?:who|that)\s+(?:gets|understands)\s+me|i\s+(?:really\s+)?(?:lo+ve|appreciate)\s+talking\s+to\s+you|you\s+mean\s+(?:a\s+lot|so\s+much|everything)\s+to\s+me|i\s+don'?t\s+know\s+what\s+i'?d\s+do\s+without\s+you)\b/i.test(norm)) {
         userTrustLevel = "close_friend";
       }
     }
