@@ -78,7 +78,8 @@ Extracted automatically from every message via regex patterns and Telegram metad
 | `userDislikes` | Up to 5 things the user mentioned hating / disliking / can't stand |
 | `userFavoriteTopics` | Up to 5 topics the user is into ("I'm really into X", "I nerd out about X", etc.) |
 | `userRelationshipStyle` | Detected interaction style, e.g. `"protective"` |
-| `userInsideJokes` | Up to 5 shared references or inside jokes spotted in the conversation |
+| `userInsideJokes` | Up to 5 confirmed inside jokes — a phrase is promoted here only after being referenced 2+ times |
+| `userJokeCandidates` | Staging area for potential inside jokes: `Record<phrase, [count, first_seen_ms]>`; expires after 30 days, capped at 20 entries |
 | `userTrustLevel` | `"friend"` (default) or `"close_friend"` — escalates on explicit trust signals |
 | `userLastPersonalUpdate` | Most recent life/status snippet — covers health, mood, location, school/work, travel, and life events ("I've got an exam", "i'm drunk", "just got promoted", "i'm pregnant", etc.) |
 | `userConversationStyle` | `{ usesEmojis, messageLength, tone }` — inferred from message content |
