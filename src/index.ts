@@ -136,11 +136,14 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Normalize casual chat text for robust regex matching.
+ * - Converts smart/curly apostrophes and similar chars to ASCII ' so regex i'?m works on phone input
  * - Collapses 3+ repeated characters ('loooove' → 'love')
  * - Collapses multiple whitespace into a single space
  */
 function normalizeForMatching(text: string): string {
   return text
+    .replace(/[\u2018\u2019\u02BC\uFF07]/g, "'") // smart/curly apostrophes → straight ASCII
+    .replace(/[\u201C\u201D]/g, '"')              // smart double quotes → straight ASCII
     .replace(/(.)(\1){2,}/g, "$1")
     .replace(/\s+/g, " ")
     .trim();
@@ -580,6 +583,53 @@ async function maybeSummarise(
   return { summary: newSummary, lastSummarizedAt: memory.turnCount ?? 0 };
 }
 
+/** Extract the profile-only fields from memory for long-term KV storage. */
+function extractProfileData(memory: ChatMemory): Partial<ChatMemory> {
+  return {
+    userName: memory.userName, userNickname: memory.userNickname, userAge: memory.userAge,
+    userLikes: memory.userLikes, userDislikes: memory.userDislikes,
+    userFavoriteTopics: memory.userFavoriteTopics, userRelationshipStyle: memory.userRelationshipStyle,
+    userInsideJokes: memory.userInsideJokes, userTrustLevel: memory.userTrustLevel,
+    userLastPersonalUpdate: memory.userLastPersonalUpdate, userConversationStyle: memory.userConversationStyle,
+    userFirstTalked: memory.userFirstTalked, userLastTalked: memory.userLastTalked,
+  };
+}
+
+/**
+ * Load conversation (chat:<id>) + profile (profile:<id>) from KV in parallel,
+ * merging both into a single ChatMemory object. Profile fields overwrite chat fields
+ * so the permanent profile always wins when both keys exist.
+ */
+async function loadChatMemory(env: Env, chatId: number): Promise<ChatMemory> {
+  const base: ChatMemory = { messages: [], turnCount: 0, lastSummarizedAt: 0, updatedAt: Date.now() };
+  try {
+    const [chatRaw, profileRaw] = await Promise.all([
+      env.CHAT_MEMORY.get(`chat:${chatId}`),
+      env.CHAT_MEMORY.get(`profile:${chatId}`),
+    ]);
+    if (chatRaw) Object.assign(base, JSON.parse(chatRaw));
+    if (profileRaw) Object.assign(base, JSON.parse(profileRaw)); // profile wins
+  } catch { /* start fresh */ }
+  return base;
+}
+
+/**
+ * Persist conversation history to chat:<id> with 24 h TTL (auto-reset daily)
+ * and user profile to profile:<id> with no TTL (kept forever).
+ */
+async function saveChatMemory(env: Env, chatId: number, memory: ChatMemory): Promise<void> {
+  const profile = extractProfileData(memory);
+  const conversation = {
+    messages: memory.messages, summary: memory.summary, turnCount: memory.turnCount,
+    lastSummarizedAt: memory.lastSummarizedAt, lastGoodModel: memory.lastGoodModel,
+    pendingUser: memory.pendingUser, updatedAt: memory.updatedAt,
+  };
+  await Promise.all([
+    env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(conversation), { expirationTtl: KV_TTL }),
+    env.CHAT_MEMORY.put(`profile:${chatId}`, JSON.stringify(profile)), // no TTL = kept forever
+  ]);
+}
+
 export interface Env {
   TELEGRAM_BOT_TOKEN: string;
   OPENROUTER_API_KEY: string;
@@ -646,34 +696,20 @@ export default {
 
       // ── /start ────────────────────────────────────────────────────────────
       if (text === "/start") {
-        // Load existing memory so we can preserve the full user profile across resets
-        let existingProfile: UserProfile = {};
-        try {
-          const stored = await env.CHAT_MEMORY.get(`chat:${chatId}`);
-          if (stored) {
-            const m: ChatMemory = JSON.parse(stored);
-            existingProfile = {
-              userName: m.userName, userNickname: m.userNickname, userAge: m.userAge,
-              userLikes: m.userLikes, userDislikes: m.userDislikes,
-              userFavoriteTopics: m.userFavoriteTopics, userRelationshipStyle: m.userRelationshipStyle,
-              userInsideJokes: m.userInsideJokes, userTrustLevel: m.userTrustLevel,
-              userLastPersonalUpdate: m.userLastPersonalUpdate,
-              userConversationStyle: m.userConversationStyle,
-              userFirstTalked: m.userFirstTalked, userLastTalked: m.userLastTalked,
-            };
-          }
-        } catch { /* ignore */ }
+        // Load existing profile (permanent key) so we preserve it across resets
+        const existingMemory = await loadChatMemory(env, chatId);
+        const existingProfile = extractProfileData(existingMemory);
         // Capture name from /start sender if not yet known
         const startFrom = msg.from;
         const startName = startFrom?.first_name || startFrom?.username;
-        const userName = existingProfile.userName || startName;
-        // Write fresh memory preserving full user profile
+        const userName = (existingProfile.userName as string | undefined) || startName;
+        // Write fresh conversation, preserve full user profile
         const freshMemory: ChatMemory = {
           messages: [], turnCount: 0, lastSummarizedAt: 0, updatedAt: Date.now(),
           ...existingProfile,
           userName,
         };
-        await env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(freshMemory), { expirationTtl: KV_TTL }).catch(() => {});
+        await saveChatMemory(env, chatId, freshMemory).catch(() => {});
         const greeting = userName
           ? `hey ${userName}! i'm iCub 🤖 what's up?`
           : "hey! i'm iCub 🤖 what's on your mind?";
@@ -684,39 +720,19 @@ export default {
       // ── /reset ────────────────────────────────────────────────────────────
       if (text === "/reset") {
         // Clear conversation history only — keep the full user profile
-        let resetProfile: UserProfile = {};
-        try {
-          const stored = await env.CHAT_MEMORY.get(`chat:${chatId}`);
-          if (stored) {
-            const m: ChatMemory = JSON.parse(stored);
-            resetProfile = {
-              userName: m.userName, userNickname: m.userNickname, userAge: m.userAge,
-              userLikes: m.userLikes, userDislikes: m.userDislikes,
-              userFavoriteTopics: m.userFavoriteTopics, userRelationshipStyle: m.userRelationshipStyle,
-              userInsideJokes: m.userInsideJokes, userTrustLevel: m.userTrustLevel,
-              userLastPersonalUpdate: m.userLastPersonalUpdate,
-              userConversationStyle: m.userConversationStyle,
-              userFirstTalked: m.userFirstTalked, userLastTalked: m.userLastTalked,
-            };
-          }
-        } catch { /* ignore */ }
+        const resetExisting = await loadChatMemory(env, chatId);
+        const resetProfile = extractProfileData(resetExisting);
         const clearedMemory: ChatMemory = {
           messages: [], turnCount: 0, lastSummarizedAt: 0, updatedAt: Date.now(),
           ...resetProfile,
         };
-        await env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(clearedMemory), { expirationTtl: KV_TTL }).catch(() => {});
+        await saveChatMemory(env, chatId, clearedMemory).catch(() => {});
         await sendTelegramMessage(env.TELEGRAM_BOT_TOKEN, chatId, "ok let's start fresh 👍");
         return new Response("ok", { status: 200 });
       }
 
       // ── Load memory ───────────────────────────────────────────────────────
-      let memory: ChatMemory = {
-        messages: [], turnCount: 0, lastSummarizedAt: 0, updatedAt: Date.now(),
-      };
-      try {
-        const stored = await env.CHAT_MEMORY.get(`chat:${chatId}`);
-        if (stored) memory = { ...memory, ...JSON.parse(stored) };
-      } catch { /* start fresh */ }
+      let memory = await loadChatMemory(env, chatId);
 
       const history = memory.messages ?? [];
       const lastAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content;
@@ -818,9 +834,7 @@ export default {
               userLastTalked,
               updatedAt: Date.now(),
             };
-            await env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(newMemory), {
-              expirationTtl: KV_TTL,
-            }).catch(() => {});
+            await saveChatMemory(env, chatId, newMemory).catch(() => {});
           })()
         );
 
@@ -844,9 +858,7 @@ export default {
         memory.userConversationStyle = userConversationStyle;
         memory.userFirstTalked = userFirstTalked;
         memory.userLastTalked = userLastTalked;
-        env.CHAT_MEMORY.put(`chat:${chatId}`, JSON.stringify(memory), {
-          expirationTtl: KV_TTL,
-        }).catch(() => {});
+        saveChatMemory(env, chatId, memory).catch(() => {});
         reply = pickRandom(ICUB_FALLBACKS);
       }
 
