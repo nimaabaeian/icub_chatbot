@@ -5,3 +5,10 @@ node_modules/
 .env.*
 .DS_Store
 .secrets
+
+# VSCode
+.vscode/settings.json
+.vscode/browse.vc.db
+.vscode/browse.vc.db-shm
+.vscode/browse.vc.db-wal
+.vscode/c_cpp_properties.json
