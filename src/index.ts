@@ -25,7 +25,7 @@ const ICUB_FALLBACKS = [
   "Uh oh, I am not sure what happened! Can you ask me again? I want to answer you properly!",
 ];
 
-type ChatMessage = { role: "user" | "assistant"; content: string };
+type ChatMessage = { role: "user" | "assistant"; content: string; ts?: number }; // ts = Unix seconds (Telegram date)
 type UserConversationStyle = {
   usesEmojis: boolean | null;
   messageLength: string;  // "short" | "medium" | "long"
@@ -46,6 +46,7 @@ type UserProfile = {
   userConversationStyle?: UserConversationStyle;
   userFirstTalked?: number;
   userLastTalked?: number;
+  userUtcOffset?: number;         // UTC offset in hours (e.g. 1 for CET, -5 for EST)
 };
 type ChatMemory = {
   messages: ChatMessage[];
@@ -69,6 +70,7 @@ type ChatMemory = {
   userConversationStyle?: UserConversationStyle;
   userFirstTalked?: number;       // ms timestamp of first interaction
   userLastTalked?: number;        // ms timestamp of most recent interaction
+  userUtcOffset?: number;         // UTC offset in hours, inferred from conversation
   updatedAt: number;
 };
 type OpenRouterMessage = { role: "system" | "user" | "assistant"; content: string };
@@ -89,27 +91,220 @@ function isSystemlessModel(model: string): boolean {
   return SYSTEMLESS_MODEL_PREFIXES.some((p) => model.startsWith(p));
 }
 
+// ── Timezone / DST helpers ───────────────────────────────────────────────────
+/** UTC ms of the last Sunday of `month` (0-indexed) in `year` at 00:00 UTC. */
+function lastSundayUTC(year: number, month: number): number {
+  const last = new Date(Date.UTC(year, month + 1, 0));
+  last.setUTCDate(last.getUTCDate() - last.getUTCDay());
+  return last.getTime();
+}
+/** UTC ms of the nth (1-based) Sunday of `month` (0-indexed) in `year` at 00:00 UTC. */
+function nthSundayUTC(year: number, month: number, n: number): number {
+  const d = new Date(Date.UTC(year, month, 1));
+  const firstSunday = d.getUTCDay() === 0 ? 1 : 8 - d.getUTCDay();
+  return Date.UTC(year, month, firstSunday + (n - 1) * 7);
+}
+/** EU CET/CEST — UTC+1 winter, UTC+2 summer. */
+function getEUCETOffset(tsMs: number): number {
+  const yr = new Date(tsMs).getUTCFullYear();
+  return (tsMs >= lastSundayUTC(yr, 2) + 3_600_000 && tsMs < lastSundayUTC(yr, 9) + 3_600_000) ? 2 : 1;
+}
+/** UK / Ireland / Portugal — UTC+0 winter, UTC+1 summer. */
+function getGMTBSTOffset(tsMs: number): number { return getEUCETOffset(tsMs) - 1; }
+/** EET/EEST — UTC+2 winter, UTC+3 summer. */
+function getEETOffset(tsMs: number): number { return getEUCETOffset(tsMs) + 1; }
+/** US Eastern — UTC-5 / UTC-4. */
+function getUSEastOffset(tsMs: number): number {
+  const yr = new Date(tsMs).getUTCFullYear();
+  return (tsMs >= nthSundayUTC(yr, 2, 2) + 7 * 3_600_000 && tsMs < nthSundayUTC(yr, 10, 1) + 6 * 3_600_000) ? -4 : -5;
+}
+function getUSCentralOffset(tsMs: number): number  { return getUSEastOffset(tsMs) - 1; }
+function getUSMountainOffset(tsMs: number): number { return getUSEastOffset(tsMs) - 2; }
+function getUSPacificOffset(tsMs: number): number  { return getUSEastOffset(tsMs) - 3; }
+/** Australia Eastern — roughly UTC+11 Oct–Mar (AEDT), UTC+10 Apr–Sep (AEST). */
+function getAESTOffset(tsMs: number): number {
+  const m = new Date(tsMs).getUTCMonth();
+  return (m >= 9 || m <= 2) ? 11 : 10;
+}
+/** New Zealand — roughly UTC+13 Sep–Apr (NZDT), UTC+12 Apr–Sep (NZST). */
+function getNZOffset(tsMs: number): number {
+  const m = new Date(tsMs).getUTCMonth();
+  return (m >= 8 || m <= 3) ? 13 : 12;
+}
+
+type OffsetResolver = number | ((tsMs: number) => number);
+/** City / country → UTC offset resolver. First regex match wins. */
+const LOCATION_TZ_MAP: Array<[RegExp, OffsetResolver]> = [
+  // EU CET/CEST (+1/+2)
+  [/\b(?:italy|italian|rome|milan|naples|turin|venice|florence|sicily|sardinia|palermo|bologna)\b/i, getEUCETOffset],
+  [/\b(?:germany|german|berlin|munich|hamburg|frankfurt|cologne|stuttgart|dusseldorf)\b/i, getEUCETOffset],
+  [/\b(?:france|french|paris|lyon|marseille|toulouse|nice|bordeaux|strasbourg)\b/i, getEUCETOffset],
+  [/\b(?:spain|spanish|madrid|barcelona|seville|valencia|bilbao|malaga|zaragoza)\b/i, getEUCETOffset],
+  [/\b(?:netherlands|dutch|amsterdam|rotterdam|the\s+hague|eindhoven|utrecht)\b/i, getEUCETOffset],
+  [/\b(?:belgium|brussels|antwerp|ghent|bruges)\b/i, getEUCETOffset],
+  [/\b(?:sweden|stockholm|norway|oslo|denmark|copenhagen)\b/i, getEUCETOffset],
+  [/\b(?:switzerland|zurich|geneva|bern|lausanne|basel)\b/i, getEUCETOffset],
+  [/\b(?:austria|vienna|graz|salzburg|innsbruck)\b/i, getEUCETOffset],
+  [/\b(?:poland|warsaw|krakow|czech|prague|slovakia|bratislava|hungary|budapest)\b/i, getEUCETOffset],
+  [/\b(?:croatia|zagreb|slovenia|serbia|belgrade|albania|bosnia|sarajevo|montenegro)\b/i, getEUCETOffset],
+  // GMT/BST (+0/+1)
+  [/\b(?:uk|united\s+kingdom|england|britain|british|london|manchester|birmingham|leeds|glasgow|edinburgh)\b/i, getGMTBSTOffset],
+  [/\b(?:ireland|irish|dublin|cork|galway)\b/i, getGMTBSTOffset],
+  [/\b(?:portugal|portuguese|lisbon|porto)\b/i, getGMTBSTOffset],
+  // EET/EEST (+2/+3)
+  [/\b(?:greece|greek|athens|thessaloniki)\b/i, getEETOffset],
+  [/\b(?:romania|bucharest|bulgaria|sofia|cyprus|nicosia|ukraine|kyiv|kiev)\b/i, getEETOffset],
+  [/\b(?:finland|helsinki|estonia|latvia|riga|lithuania|vilnius)\b/i, getEETOffset],
+  // Static Europe
+  [/\b(?:turkey|turkish|istanbul|ankara|izmir)\b/i, 3],
+  [/\b(?:russia|moscow|saint\s+petersburg|st\.?\s*petersburg)\b/i, 3],
+  [/\b(?:israel|tel\s+aviv|jerusalem|haifa)\b/i, 2],
+  // Middle East
+  [/\b(?:uae|dubai|abu\s+dhabi|united\s+arab\s+emirates)\b/i, 4],
+  [/\b(?:saudi(?:\s+arabia)?|riyadh|jeddah|mecca)\b/i, 3],
+  [/\b(?:qatar|doha|kuwait|bahrain|iraq|baghdad)\b/i, 3],
+  [/\b(?:iran|tehran)\b/i, 3.5],
+  [/\b(?:egypt|cairo|alexandria)\b/i, 2],
+  // Asia
+  [/\b(?:india|indian|mumbai|delhi|new\s+delhi|bangalore|bengaluru|hyderabad|chennai|kolkata|pune|ahmedabad)\b/i, 5.5],
+  [/\b(?:pakistan|karachi|lahore|islamabad)\b/i, 5],
+  [/\b(?:bangladesh|dhaka)\b/i, 6],
+  [/\b(?:nepal|kathmandu)\b/i, 5.75],
+  [/\b(?:china|chinese|beijing|shanghai|shenzhen|guangzhou|hong\s+kong|macau|taipei|taiwan)\b/i, 8],
+  [/\b(?:japan|japanese|tokyo|osaka|kyoto|yokohama|nagoya|hiroshima)\b/i, 9],
+  [/\b(?:(?:south\s+)?korea|korean|seoul|busan|incheon)\b/i, 9],
+  [/\b(?:singapore|malaysia|kuala\s+lumpur|philippines|manila)\b/i, 8],
+  [/\b(?:indonesia|jakarta|bali)\b/i, 7],
+  [/\b(?:thailand|thai|bangkok)\b/i, 7],
+  [/\b(?:vietnam|vietnamese|hanoi|ho\s+chi\s+minh|saigon)\b/i, 7],
+  // Africa
+  [/\b(?:south\s+africa|johannesburg|cape\s+town|durban|pretoria)\b/i, 2],
+  [/\b(?:nigeria|lagos|abuja)\b/i, 1],
+  [/\b(?:kenya|nairobi)\b/i, 3],
+  [/\b(?:morocco|casablanca|rabat|tunisia|tunis|algeria|algiers)\b/i, 1],
+  // Americas — US / Canada
+  [/\b(?:new\s+york|nyc|boston|miami|atlanta|washington\s*d\.?c\.?|philadelphia|toronto|montreal|ottawa|eastern\s+time|est\b|edt\b)\b/i, getUSEastOffset],
+  [/\b(?:chicago|houston|dallas|austin|minneapolis|cst\b|cdt\b|central\s+time)\b/i, getUSCentralOffset],
+  [/\b(?:denver|phoenix|salt\s+lake|calgary|edmonton|mst\b|mdt\b|mountain\s+time)\b/i, getUSMountainOffset],
+  [/\b(?:los\s+angeles|san\s+francisco|seattle|portland|las\s+vegas|california|vancouver|pst\b|pdt\b|pacific\s+time)\b/i, getUSPacificOffset],
+  [/\b(?:hawaii|honolulu)\b/i, -10],
+  // Americas — South
+  [/\b(?:brazil|brazilian|s[aã]o\s+paulo|rio\b|bras[ií]lia)\b/i, -3],
+  [/\b(?:argentina|buenos\s+aires|chile|santiago)\b/i, -3],
+  [/\b(?:colombia|bogot[aá]|peru|lima|ecuador|quito)\b/i, -5],
+  [/\b(?:mexico\s+city|cdmx)\b/i, getUSCentralOffset],
+  // Oceania
+  [/\b(?:sydney|melbourne|brisbane|canberra|adelaide)\b/i, getAESTOffset],
+  [/\b(?:perth|western\s+australia)\b/i, 8],
+  [/\b(?:new\s+zealand|auckland|wellington|christchurch)\b/i, getNZOffset],
+];
+
+/**
+ * Format a Unix-seconds timestamp into a human-readable local time string,
+ * using the provided UTC offset. e.g. "Tuesday night (11:42 PM UTC+01:00)"
+ */
+function formatMessageTime(unixSec: number, utcOffset: number): string {
+  // Shift timestamp so UTC methods reflect local time
+  const localMs = (unixSec + utcOffset * 3600) * 1000;
+  const d = new Date(localMs);
+  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const dayName = days[d.getUTCDay()];
+  const h = d.getUTCHours();
+  const m = d.getUTCMinutes();
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  const mStr = m.toString().padStart(2, "0");
+  const sign = utcOffset >= 0 ? "+" : "-";
+  const absOfs = Math.abs(utcOffset);
+  const ofsH = Math.floor(absOfs).toString().padStart(2, "0");
+  const ofsM = Math.round((absOfs % 1) * 60).toString().padStart(2, "0");
+  const tzLabel = `UTC${sign}${ofsH}:${ofsM}`;
+  let period: string;
+  if (h >= 5 && h < 12) period = "morning";
+  else if (h >= 12 && h < 17) period = "afternoon";
+  else if (h >= 17 && h < 21) period = "evening";
+  else period = "night";
+  return `${dayName} ${period} (${h12}:${mStr} ${ampm} ${tzLabel})`;
+}
+
+/**
+ * Return a human-readable relative-time string for use inside the model context.
+ * e.g. "just now", "5 min ago", "yesterday", "3 days ago", "2 weeks ago"
+ */
+function formatRelativeTime(tsMs: number, nowMs: number): string {
+  const diff = nowMs - tsMs;
+  if (diff < 0) return "just now";
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60)  return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60)  return `${min} min ago`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24)  return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days === 1) return "yesterday";
+  if (days < 7)  return `${days} days ago`;
+  const weeks = Math.floor(days / 7);
+  return weeks === 1 ? "1 week ago" : `${weeks} weeks ago`;
+}
+
+/**
+ * Return a compact exact local datetime string for history annotations.
+ * e.g. "Mon 09 Mar 2026, 11:42 PM"
+ */
+function formatExactTime(unixSec: number, utcOffset: number): string {
+  const localMs = (unixSec + utcOffset * 3600) * 1000;
+  const d = new Date(localMs);
+  const days  = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const dayName = days[d.getUTCDay()];
+  const dd  = d.getUTCDate().toString().padStart(2, "0");
+  const mon = months[d.getUTCMonth()];
+  const yr  = d.getUTCFullYear();
+  const h   = d.getUTCHours();
+  const m   = d.getUTCMinutes().toString().padStart(2, "0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12  = (h % 12 || 12).toString();
+  return `${dayName} ${dd} ${mon} ${yr}, ${h12}:${m} ${ampm}`;
+}
+
 /** Build the message array for a given model, injecting summary and context window. */
 function buildMessagesForModel(
   model: string,
   history: ChatMessage[],
   summary: string | undefined,
   userText: string,
+  utcOffset: number,
   userContext?: string
 ): OpenRouterMessage[] {
-  const ctx = history.slice(-CONTEXT_WINDOW);
+  const now = Date.now();
+  const rawCtx = history.slice(-CONTEXT_WINDOW);
+
+  // Prefix each history message with exact date/time + relative age so the model
+  // knows precisely when each exchange happened.
+  // e.g. "[Mon 06 Mar 2026, 11:42 PM — 3 days ago]"
+  const annotate = (m: ChatMessage): OpenRouterMessage => ({
+    role: m.role,
+    content: (m.ts
+      ? `[${formatExactTime(m.ts, utcOffset)} — ${formatRelativeTime(m.ts * 1000, now)}] `
+      : "") + m.content,
+  });
 
   if (!isSystemlessModel(model)) {
     const msgs: OpenRouterMessage[] = [{ role: "system", content: SYSTEM_PROMPT }];
     if (userContext) msgs.push({ role: "system", content: userContext });
     if (summary) msgs.push({ role: "system", content: `Summary so far: ${summary}` });
-    msgs.push(...ctx, { role: "user", content: userText });
+    msgs.push(...rawCtx.map(annotate), { role: "user", content: userText });
     return msgs;
   }
 
   // Gemma/systemless: fold system prompt + summary + transcript into one user message
-  const transcript = ctx
-    .map((m) => `${m.role === "user" ? "User" : "iCub"}: ${m.content}`)
+  const transcript = rawCtx
+    .map((m) => {
+      const tag = m.ts
+        ? ` [${formatExactTime(m.ts, utcOffset)} — ${formatRelativeTime(m.ts * 1000, now)}]`
+        : "";
+      return `${m.role === "user" ? "User" : "iCub"}${tag}: ${m.content}`;
+    })
     .join("\n");
   const combined =
     `${SYSTEM_PROMPT}` +
@@ -202,7 +397,8 @@ function sendTypingAction(token: string, chatId: number): void {
 function extractUserInfo(
   memory: ChatMemory,
   fromName: string | undefined,
-  userText: string
+  userText: string,
+  msgTimestamp?: number
 ): UserProfile {
   const now = Date.now();
 
@@ -224,6 +420,7 @@ function extractUserInfo(
     : { usesEmojis: null, messageLength: "", tone: "" };
   const userFirstTalked = memory.userFirstTalked ?? now;
   const userLastTalked = now;
+  let userUtcOffset: number | undefined = memory.userUtcOffset;
 
   // Capture Telegram display name if not yet known
   if (fromName && !userName) userName = fromName;
@@ -412,6 +609,45 @@ function extractUserInfo(
         userTrustLevel = "close_friend";
       }
     }
+
+    // ── Timezone detection ────────────────────────────────────────────────────
+    // 1. Explicit UTC/GMT offset: "UTC+2", "GMT-5", "UTC+5:30"
+    const utcOffsetMatch = norm.match(/\b(?:utc|gmt)\s*([+-])\s*(\d{1,2})(?::(\d{2}))?\b/i);
+    if (utcOffsetMatch) {
+      const sign = utcOffsetMatch[1] === "+" ? 1 : -1;
+      const hrs  = parseInt(utcOffsetMatch[2], 10);
+      const mins = parseInt(utcOffsetMatch[3] ?? "0", 10);
+      const ofs  = sign * (hrs + mins / 60);
+      if (ofs >= -12 && ofs <= 14) userUtcOffset = Math.round(ofs * 2) / 2;
+    }
+
+    // 2. "it's X am/pm here" → infer offset from message send time
+    if (userUtcOffset === undefined && msgTimestamp) {
+      const tHereMatch = norm.match(
+        /\bit'?s\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s+(?:here|for\s+me|over\s+here|atm|right\s+now)\b/i
+      );
+      if (tHereMatch) {
+        let lh = parseInt(tHereMatch[1], 10);
+        const ap = tHereMatch[3].toLowerCase();
+        if (ap === "pm" && lh < 12) lh += 12;
+        if (ap === "am" && lh === 12) lh = 0;
+        const utcH = new Date(msgTimestamp * 1000).getUTCHours();
+        let diff = lh - utcH;
+        if (diff > 14) diff -= 24;
+        if (diff < -12) diff += 24;
+        userUtcOffset = Math.round(diff * 2) / 2;
+      }
+    }
+
+    // 3. City / country name → lookup table
+    if (userUtcOffset === undefined && msgTimestamp) {
+      for (const [re, ofsFn] of LOCATION_TZ_MAP) {
+        if (re.test(norm)) {
+          userUtcOffset = typeof ofsFn === "function" ? ofsFn(msgTimestamp * 1000) : ofsFn;
+          break;
+        }
+      }
+    }
   }
 
   return {
@@ -429,6 +665,7 @@ function extractUserInfo(
     userConversationStyle,
     userFirstTalked,
     userLastTalked,
+    userUtcOffset,
   };
 }
 
@@ -635,6 +872,7 @@ function extractProfileData(memory: ChatMemory): Partial<ChatMemory> {
     userTrustLevel: memory.userTrustLevel,
     userLastPersonalUpdate: memory.userLastPersonalUpdate, userConversationStyle: memory.userConversationStyle,
     userFirstTalked: memory.userFirstTalked, userLastTalked: memory.userLastTalked,
+    userUtcOffset: memory.userUtcOffset,
   };
 }
 
@@ -688,8 +926,8 @@ export interface Env {
 
 type TelegramUpdate = {
   update_id?: number;
-  message?: { chat?: { id?: number }; text?: string; from?: { first_name?: string; username?: string } };
-  edited_message?: { chat?: { id?: number }; text?: string; from?: { first_name?: string; username?: string } };
+  message?: { chat?: { id?: number }; text?: string; date?: number; from?: { first_name?: string; username?: string } };
+  edited_message?: { chat?: { id?: number }; text?: string; date?: number; from?: { first_name?: string; username?: string } };
 };
 
 export default {
@@ -781,12 +1019,14 @@ export default {
       const lastAssistant = [...history].reverse().find((m) => m.role === "assistant")?.content;
 
       // ── User identity: extract/update full user profile ────────────────────
+      // Capture BEFORE extractUserInfo so we can compute the gap to this message.
+      const prevLastTalked = memory.userLastTalked;
       const fromName = msg.from?.first_name || msg.from?.username;
-      const userProfile = extractUserInfo(memory, fromName, text);
+      const userProfile = extractUserInfo(memory, fromName, text, msg.date);
       const { userName, userNickname, userAge, userLikes, userDislikes,
               userFavoriteTopics, userRelationshipStyle, userInsideJokes, userJokeCandidates,
               userTrustLevel, userLastPersonalUpdate, userConversationStyle,
-              userFirstTalked, userLastTalked } = userProfile;
+              userFirstTalked, userLastTalked, userUtcOffset } = userProfile;
 
       // ── Typing indicator (best-effort, fire-and-forget) ───────────────────
       sendTypingAction(env.TELEGRAM_BOT_TOKEN, chatId);
@@ -815,6 +1055,26 @@ export default {
       // ── Total-budget deadline ─────────────────────────────────────────────
       const deadline = Date.now() + TOTAL_BUDGET_MS;
 
+      // ── Message timestamp context ─────────────────────────────────────────
+      // Use Telegram's `date` (Unix seconds) so iCub knows the real send time.
+      // Default to Italy (CET/CEST) if no timezone has been inferred yet.
+      const msgTimeSec = msg.date;
+      const effectiveOffset = userUtcOffset !== undefined
+        ? userUtcOffset
+        : getEUCETOffset((msgTimeSec ?? Math.floor(Date.now() / 1000)) * 1000);
+      const timeNote = msgTimeSec
+        ? `The user sent this message on a ${formatMessageTime(msgTimeSec, effectiveOffset)}.`
+        : "";
+
+      // ── Gap since last session ────────────────────────────────────────────
+      // Only mention the gap when it's >= 30 min (avoids noise in active chats).
+      const gapNote = (() => {
+        if (!prevLastTalked || !msgTimeSec) return "";
+        const gapMs = msgTimeSec * 1000 - prevLastTalked;
+        if (gapMs < 30 * 60 * 1000) return "";
+        return ` It has been ${formatRelativeTime(prevLastTalked, msgTimeSec * 1000)} since the user last sent a message.`;
+      })();
+
       // ── Model fallback loop ───────────────────────────────────────────────
       let reply: string | null = null;
 
@@ -823,8 +1083,8 @@ export default {
           console.log("Total budget exceeded, stopping model loop");
           break;
         }
-        const userCtx = buildUserContext(userProfile);
-        const messages = buildMessagesForModel(model, history, memory.summary, textForModel, userCtx || undefined);
+        const userCtx = [buildUserContext(userProfile), timeNote + gapNote].filter(Boolean).join(" ");
+        const messages = buildMessagesForModel(model, history, memory.summary, textForModel, effectiveOffset, userCtx || undefined);
         const result = await callOpenRouter(env, model, messages, deadline);
 
         // Fatal auth/billing error — stop the whole loop and give a friendly reply
@@ -836,11 +1096,13 @@ export default {
 
         reply = clampForTelegram(result.content || "Hmm, I did not quite get that. Can you say it again?");
 
-        // Update history
+        // Update history — attach Telegram timestamp to user message,
+        // and wall-clock seconds to the assistant reply.
+        const nowSec = Math.floor(Date.now() / 1000);
         const updatedHistory: ChatMessage[] = [
           ...history,
-          { role: "user" as const, content: text },
-          { role: "assistant" as const, content: result.content },
+          { role: "user" as const, content: text, ts: msgTimeSec ?? nowSec },
+          { role: "assistant" as const, content: result.content, ts: nowSec },
         ].slice(-MAX_TURNS);
 
         const newTurnCount = (memory.turnCount ?? 0) + 1;
@@ -876,6 +1138,7 @@ export default {
               userConversationStyle,
               userFirstTalked,
               userLastTalked,
+              userUtcOffset,
               updatedAt: Date.now(),
             };
             await saveChatMemory(env, chatId, newMemory).catch(() => {});
@@ -903,6 +1166,7 @@ export default {
         memory.userConversationStyle = userConversationStyle;
         memory.userFirstTalked = userFirstTalked;
         memory.userLastTalked = userLastTalked;
+        memory.userUtcOffset = userUtcOffset;
         saveChatMemory(env, chatId, memory).catch(() => {});
         reply = pickRandom(ICUB_FALLBACKS);
       }
