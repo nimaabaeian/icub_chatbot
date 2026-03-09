@@ -94,6 +94,8 @@ Extracted automatically from every message via regex patterns and Telegram metad
 | `userLastTalked` | Timestamp (ms epoch) of the user's most recent message |
 | `userUtcOffset` | UTC offset in hours (e.g. `1` for CET, `-5` for EST) — inferred from explicit offset strings, local-time hints ("it's 3 pm here"), or city/country name; defaults to Italy CET/CEST when unknown |
 
+Profile facts are serialised into a compact `Key: value` string and wrapped in an explicit instruction block before being injected into the model context. The wrapper instructs the model to treat the data as **silent background context only** — it must never proactively reference, mention, or allude to any profile fact unless the user's current message directly touches on that topic first. The combined string is capped at 600 characters.
+
 ---
 
 ## Directory Structure
