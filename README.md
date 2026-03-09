@@ -38,6 +38,8 @@ Notes:
 - `/start` clears conversation history but preserves the full user profile.
 - `/reset` does the same as `/start` without a greeting — useful mid-conversation.
 - In-character fallback replies when all models fail — iCub never exposes backend errors to the user.
+- **Timezone awareness**: the user's UTC offset is inferred from explicit expressions ("UTC+2"), local-time hints ("it's 3 pm here"), or city/country name matching against a DST-aware lookup table covering Europe, US, Asia, Africa, and Oceania.
+- **Message timestamps**: every stored message carries a Unix-seconds `ts` from Telegram's `date` field; the model context includes the exact local date/time and relative age of each history turn, plus a note on how long it has been since the user's last session.
 
 ## Memory
 
@@ -55,7 +57,7 @@ Memory is loaded at the start of each request and written back asynchronously vi
 
 | Field | Purpose |
 |---|---|
-| `messages` | Rolling window of the last 20 turns |
+| `messages` | Rolling window of the last 20 turns; each entry carries an optional `ts` (Unix seconds from Telegram `date`) |
 | `summary` | LLM-generated rolling summary, regenerated every 8 new turns |
 | `turnCount` | Total successful turns stored so far |
 | `lastSummarizedAt` | `turnCount` value at the last summary update |
@@ -64,6 +66,11 @@ Memory is loaded at the start of each request and written back asynchronously vi
 | `updatedAt` | Timestamp (ms epoch) of the last KV write |
 
 Only the most recent 6 messages (`CONTEXT_WINDOW`) are forwarded to the model; older context is covered by the rolling summary. Summarisation is **incremental** — only the turns added since the last summary are sent to the summariser, preventing drift over long conversations.
+
+Before being sent to a model, each context-window message is annotated with its exact local date/time and relative age (e.g. `[Mon 06 Mar 2026, 11:42 PM — 3 days ago]`). The current request additionally injects:
+
+- **`timeNote`** — the local day/time the message was sent, e.g. "The user sent this message on a Tuesday night (11:42 PM UTC+01:00)".
+- **`gapNote`** — if ≥ 30 min have elapsed since the user's last message, e.g. "It has been 2 days ago since the user last sent a message".
 
 ### User profile
 
@@ -85,6 +92,7 @@ Extracted automatically from every message via regex patterns and Telegram metad
 | `userConversationStyle` | `{ usesEmojis, messageLength, tone }` — inferred from message content |
 | `userFirstTalked` | Timestamp (ms epoch) of the user's first message |
 | `userLastTalked` | Timestamp (ms epoch) of the user's most recent message |
+| `userUtcOffset` | UTC offset in hours (e.g. `1` for CET, `-5` for EST) — inferred from explicit offset strings, local-time hints ("it's 3 pm here"), or city/country name; defaults to Italy CET/CEST when unknown |
 
 ---
 
@@ -167,11 +175,12 @@ The worker calls Telegram's `setWebhook` and returns the result as JSON.
 1. **Verify** — checks `X-Telegram-Bot-Api-Secret-Token`
 2. **Deduplicate** — `update_id` cached in KV for 5 min prevents double-processing
 3. **Load memory** — reads `ChatMemory` from KV for the chat
-4. **Extract user profile** — name, nickname, age, likes, dislikes, favourite topics, relationship style, inside jokes, trust level, life/status updates, conversation style (emoji usage, message length, tone), and interaction timestamps parsed from message text and Telegram metadata; persisted across sessions
-5. **Ambiguity rewrite** — short affirmatives ("yep", "sure") are expanded before sending to the model
-6. **Model cascade** — tries `MODELS_TO_TRY` in order, sticky on `lastGoodModel`
-7. **Reply** — clamps to 450 chars, sends via Telegram `sendMessage`
-8. **Background write** — `ctx.waitUntil()` runs summarisation + KV save without blocking the response
+4. **Extract user profile** — name, nickname, age, likes, dislikes, favourite topics, relationship style, inside jokes, trust level, life/status updates, conversation style (emoji usage, message length, tone), interaction timestamps, and **UTC offset** parsed from message text and Telegram metadata; persisted across sessions
+5. **Timezone & timestamp context** — derives the effective UTC offset (defaulting to Italy CET/CEST if unknown), annotates each history message with exact local date/time + relative age, and injects a `timeNote` / `gapNote` into the user context
+6. **Ambiguity rewrite** — short affirmatives ("yep", "sure") are expanded before sending to the model
+7. **Model cascade** — tries `MODELS_TO_TRY` in order, sticky on `lastGoodModel`
+8. **Reply** — clamps to 450 chars, sends via Telegram `sendMessage`
+9. **Background write** — `ctx.waitUntil()` runs summarisation + KV save without blocking the response
 
 ### Model fallback
 
