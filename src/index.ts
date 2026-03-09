@@ -685,34 +685,33 @@ function buildUserContext(profile: UserProfile): string {
   const name = safeStr(profile.userName);
   const nickname = safeStr(profile.userNickname);
   if (name) {
-    let nameStr = `The user's name is ${name}.`;
-    if (nickname) nameStr += ` They prefer to be called ${nickname}.`;
-    nameStr += " Only use their name very rarely — like a real friend texting, not every message.";
+    let nameStr = `Name: ${name}.`;
+    if (nickname) nameStr += ` Nickname: ${nickname}.`;
     parts.push(nameStr);
   }
 
-  if (profile.userAge) parts.push(`They are ${profile.userAge} years old.`);
+  if (profile.userAge) parts.push(`Age: ${profile.userAge}.`);
 
   // merge favorite_topics + likes (topics first, deduplicated)
   const topics = safeList(profile.userFavoriteTopics);
   const likes = safeList(profile.userLikes);
   const allInterests = [...new Set([...topics, ...likes])].slice(0, 5);
-  if (allInterests.length > 0) parts.push(`They like: ${allInterests.join(", ")}.`);
+  if (allInterests.length > 0) parts.push(`Likes: ${allInterests.join(", ")}.`);
 
   const dislikes = safeList(profile.userDislikes, 3);
-  if (dislikes.length > 0) parts.push(`They dislike: ${dislikes.join(", ")}. Don't bring these up unless they do.`);
+  if (dislikes.length > 0) parts.push(`Dislikes: ${dislikes.join(", ")}.`);
 
   const relStyle = safeStr(profile.userRelationshipStyle);
-  if (relStyle) parts.push(`Their relationship style with iCub is ${relStyle}.`);
+  if (relStyle) parts.push(`Relationship style: ${relStyle}.`);
 
   const lifeUpdate = safeStr(profile.userLastPersonalUpdate, 80);
-  if (lifeUpdate) parts.push(`Recent update from them: ${lifeUpdate}.`);
+  if (lifeUpdate) parts.push(`Recent personal update: ${lifeUpdate}.`);
 
   const jokes = safeList(profile.userInsideJokes, 3);
-  if (jokes.length > 0) parts.push(`Shared inside joke: ${jokes[jokes.length - 1]}.`);
+  if (jokes.length > 0) parts.push(`Inside joke: ${jokes[jokes.length - 1]}.`);
 
   const trust = safeStr(profile.userTrustLevel);
-  if (trust === "close_friend") parts.push("The user considers iCub a close, trusted friend.");
+  if (trust === "close_friend") parts.push("Trust level: close friend.");
 
   const cs = profile.userConversationStyle;
   if (cs) {
@@ -720,11 +719,21 @@ function buildUserContext(profile: UserProfile): string {
     if (cs.tone) styleParts.push(`${cs.tone} tone`);
     if (cs.messageLength) styleParts.push(`${cs.messageLength} messages`);
     if (cs.usesEmojis === true) styleParts.push("uses emojis");
-    if (styleParts.length > 0) parts.push(`Conversation style: ${styleParts.join(", ")}.`);
+    if (styleParts.length > 0) parts.push(`Style: ${styleParts.join(", ")}.`);
   }
 
-  const result = parts.join(" ");
-  return result.length > 400 ? result.slice(0, 397).replace(/\s\S*$/, "") + "..." : result;
+  if (parts.length === 0) return "";
+
+  // Wrap facts in a clear instruction: treat as background only, never force into conversation
+  const facts = parts.join(" ");
+  const wrapped =
+    `[Background info about this user — treat as silent context only. ` +
+    `NEVER reference, mention, or allude to any of these facts unless the user brings up the exact same topic first in this conversation. ` +
+    `Do NOT volunteer this information, do NOT use it to make small talk, do NOT weave it in proactively. ` +
+    `Only use a fact if the user's current message directly touches on it.] ` +
+    facts;
+
+  return wrapped.length > 600 ? wrapped.slice(0, 597).replace(/\s\S*$/, "") + "..." : wrapped;
 }
 
 /**
