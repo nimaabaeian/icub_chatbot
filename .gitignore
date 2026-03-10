@@ -2,9 +2,16 @@ node_modules/
 .dist/
 .wrangler/
 .env
-.env.*
 .DS_Store
-.secrets
 
 # VSCode
 .vscode/
+
+# Memory service artifacts
+*.db
+services/always_on_memory/inbox/
+services/always_on_memory/__pycache__/
+__pycache__/
+*.pyc
+.venv/
+venv/

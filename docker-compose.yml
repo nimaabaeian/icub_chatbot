@@ -1,0 +1,30 @@
+# Docker Compose for the iCub Telegram Bot stack
+#
+# Services:
+#   - memory: Always-on memory service (Python, based on Google's always-on-memory-agent)
+#
+# The Cloudflare Worker is deployed separately via `wrangler deploy`.
+
+services:
+  memory:
+    build:
+      context: ./services/always_on_memory
+      dockerfile: Dockerfile
+    ports:
+      - "8888:8888"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - MODEL=${MODEL:-gemini-2.0-flash-lite}
+      - MEMORY_DB=/app/data/memory.db
+      - INBOX_PATH=/app/inbox
+      - PORT=8888
+      - CONSOLIDATE_EVERY_MINUTES=${CONSOLIDATE_EVERY_MINUTES:-5}
+      - CONSOLIDATE_MIN_EVENTS=${CONSOLIDATE_MIN_EVENTS:-4}
+    volumes:
+      - memory-data:/app/data
+      - memory-inbox:/app/inbox
+    restart: unless-stopped
+
+volumes:
+  memory-data:
+  memory-inbox:

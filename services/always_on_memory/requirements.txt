@@ -1,0 +1,7 @@
+# Always-On Memory Service — Dependencies
+# Adapted from GoogleCloudPlatform/generative-ai/gemini/agents/always-on-memory-agent
+
+google-genai>=1.0.0
+google-adk>=1.0.0
+aiohttp>=3.9.0
+python-dotenv>=1.0.0

@@ -10,7 +10,9 @@
 	"observability": {
 		"enabled": true
 	},
-	// KV namespace for per-chat conversation memory.
+	"vars": {
+		"MEMORY_SERVICE_URL": "http://localhost:8888"
+	},
 	"kv_namespaces": [
 		{
 			"binding": "CHAT_MEMORY",
