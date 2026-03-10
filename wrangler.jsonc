@@ -11,7 +11,7 @@
 		"enabled": true
 	},
 	"vars": {
-		"MEMORY_SERVICE_URL": "https://memory.example.com"
+		"MEMORY_SERVICE_URL": "https://ready-foxes-sniff.loca.lt"
 	},
 	"kv_namespaces": [
 		{
