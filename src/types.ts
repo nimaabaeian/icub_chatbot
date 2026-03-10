@@ -63,22 +63,6 @@ export type GeminiMessage = {
   parts: Array<{ text: string }>;
 };
 
-// ── Worker operational state (KV) ───────────────────────────────
-// KV is ONLY for dedupe and a small recent-exchange buffer.
-// Long-term memory lives in the Python memory service.
-
-export type RecentExchange = {
-  role: "user" | "assistant";
-  content: string;
-  ts: number;
-};
-
-export type OperationalState = {
-  recentExchanges: RecentExchange[];
-  pendingUser?: { text: string; at: number };
-  updatedAt: number;
-};
-
 // ── Cloudflare Worker env ───────────────────────────────────────
 
 export interface Env {

@@ -569,14 +569,14 @@ async def watch_inbox(agent: MemoryAgent, inbox_path: str = INBOX_PATH, poll_int
                         event_data = json.loads(f.read_text(encoding="utf-8"))
                         log.info(f"📄 Ingesting event: {f.name}")
                         await agent.ingest_event(event_data)
+                        
+                        db.execute(
+                            "INSERT OR REPLACE INTO processed_files (file_path, processed_at) VALUES (?, ?)",
+                            (str(f), datetime.now(timezone.utc).isoformat()),
+                        )
+                        db.commit()
                     except Exception as file_err:
                         log.error(f"Error ingesting {f.name}: {file_err}")
-
-                    db.execute(
-                        "INSERT OR REPLACE INTO processed_files (file_path, processed_at) VALUES (?, ?)",
-                        (str(f), datetime.now(timezone.utc).isoformat()),
-                    )
-                    db.commit()
         except Exception as e:
             log.error(f"Watch error: {e}")
 

@@ -11,7 +11,7 @@
 		"enabled": true
 	},
 	"vars": {
-		"MEMORY_SERVICE_URL": "http://localhost:8888"
+		"MEMORY_SERVICE_URL": "https://memory.example.com"
 	},
 	"kv_namespaces": [
 		{

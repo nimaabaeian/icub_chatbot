@@ -141,7 +141,6 @@ All variables are documented in `.env`. Key ones:
 ```bash
 npm run dev       # local dev
 npm run deploy    # deploy Worker
-npm run test      # run vitest
 ```
 
 ## Credits

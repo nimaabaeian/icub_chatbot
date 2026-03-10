@@ -4,7 +4,7 @@
  * Uses the Gemini REST API directly — no SDK needed in the Worker.
  */
 
-import type { Env, GeminiMessage, RecentExchange } from "./types";
+import type { Env, GeminiMessage } from "./types";
 
 const MODEL_TIMEOUT_MS = 25_000;
 const GEMINI_MODEL = "gemini-2.0-flash";
@@ -14,19 +14,11 @@ const SYSTEM_PROMPT = `You are iCub, a small humanoid robot kid texting your fri
 export async function callGemini(
   env: Env,
   userText: string,
-  memoryContext: string,
-  recentExchanges: RecentExchange[]
+  memoryContext: string
 ): Promise<string | null> {
-  const contents: GeminiMessage[] = [];
-
-  for (const ex of recentExchanges) {
-    contents.push({
-      role: ex.role === "user" ? "user" : "model",
-      parts: [{ text: ex.content }],
-    });
-  }
-
-  contents.push({ role: "user", parts: [{ text: userText }] });
+  const contents: GeminiMessage[] = [
+    { role: "user", parts: [{ text: userText }] }
+  ];
 
   let systemInstruction = SYSTEM_PROMPT;
   if (memoryContext) {
